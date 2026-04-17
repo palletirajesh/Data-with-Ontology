@@ -1,0 +1,5 @@
+streamlit
+pandas
+requests
+rdflib
+databricks-sql-connector

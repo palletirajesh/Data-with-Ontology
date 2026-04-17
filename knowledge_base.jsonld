@@ -1,0 +1,190 @@
+{
+  "@context": {
+    "bank": "http://gen_ai_bank.com/ontology#",
+    "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+    "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+    "owl": "http://www.w3.org/2002/07/owl#",
+    "hasColumn": { "@id": "bank:hasColumn", "@type": "@id" },
+    "joinsWith": { "@id": "bank:joinsWith" },
+    "targetTable": { "@id": "bank:targetTable", "@type": "@id" },
+    "sourceKey": { "@id": "bank:sourceKey" },
+    "targetKey": { "@id": "bank:targetKey" },
+    "representsConcept": { "@id": "bank:representsConcept", "@type": "@id" },
+    "businessJargon": { "@id": "bank:businessJargon", "@container": "@set" }
+  },
+  "@graph": [
+    {
+      "@id": "bank:fact_card_ledger",
+      "@type": "bank:Table",
+      "rdfs:label": "gen_ai_bank.fact_card_ledger (l)",
+      "joinsWith": [
+        {
+          "@type": "bank:JoinDefinition",
+          "targetTable": "bank:dim_customer",
+          "sourceKey": "card_id",
+          "targetKey": "card_id"
+        },
+		{
+          "@type": "bank:JoinDefinition",
+          "targetTable": "bank:dim_card_association",
+          "sourceKey": "card_id",
+          "targetKey": "card_id"
+        }
+      ],
+      "hasColumn": [
+        "bank:col_card_id",
+        "bank:col_used_amount",
+        "bank:col_unutilized_amount",
+        "bank:col_days_past_due"
+      ]
+    },
+    {
+      "@id": "bank:dim_customer",
+      "@type": "bank:Table",
+      "rdfs:label": "gen_ai_bank.dim_customer (c)",
+      "joinsWith": [
+        {
+          "@type": "bank:JoinDefinition",
+          "targetTable": "bank:fact_card_ledger",
+          "sourceKey": "card_id",
+          "targetKey": "card_id"
+        },
+        {
+          "@type": "bank:JoinDefinition",
+          "targetTable": "bank:dim_card_association",
+          "sourceKey": "card_id",
+          "targetKey": "card_id"
+        },
+        {
+          "@type": "bank:JoinDefinition",
+          "targetTable": "bank:fact_credit_bureau",
+          "sourceKey": "ssn_hash",
+          "targetKey": "ssn_hash"
+        }
+      ],
+      "hasColumn": [
+        "bank:col_cust_id",
+        "bank:col_customer_name",
+        "bank:col_ssn_hash",
+        "bank:col_card_id_cust"
+      ]
+    },
+    {
+      "@id": "bank:dim_card_association",
+      "@type": "bank:Table",
+      "rdfs:label": "gen_ai_bank.dim_card_association (a)",
+      "joinsWith": [
+        {
+          "@type": "bank:JoinDefinition",
+          "targetTable": "bank:dim_customer",
+          "sourceKey": "card_id",
+          "targetKey": "card_id"
+        },
+		{
+          "@type": "bank:JoinDefinition",
+          "targetTable": "bank:fact_card_ledger",
+          "sourceKey": "card_id",
+          "targetKey": "card_id"
+        }
+      ],
+      "hasColumn": [
+        "bank:col_data_unit",
+        "bank:col_card_id_assoc"
+      ]
+    },
+    {
+      "@id": "bank:fact_credit_bureau",
+      "@type": "bank:Table",
+      "rdfs:label": "gen_ai_bank.fact_credit_bureau (f)",
+      "joinsWith": [
+        {
+          "@type": "bank:JoinDefinition",
+          "targetTable": "bank:dim_customer",
+          "sourceKey": "ssn_hash",
+          "targetKey": "ssn_hash"
+        }
+      ],
+      "hasColumn": [
+        "bank:col_fico_score",
+        "bank:col_ssn_hash_bureau"
+      ]
+    },
+    {
+      "@id": "bank:col_days_past_due",
+      "@type": "bank:Column",
+      "rdfs:label": "days_past_due",
+      "representsConcept": "bank:Concept_PaymentDelay"
+    },
+    {
+      "@id": "bank:col_used_amount",
+      "@type": "bank:Column",
+      "rdfs:label": "used_amount",
+      "representsConcept": "bank:Concept_Debt"
+    },
+    {
+      "@id": "bank:col_unutilized_amount",
+      "@type": "bank:Column",
+      "rdfs:label": "unutilized_amount",
+      "representsConcept": "bank:Concept_AvailableCredit"
+    },
+    {
+      "@id": "bank:col_data_unit",
+      "@type": "bank:Column",
+      "rdfs:label": "data_unit",
+      "representsConcept": "bank:Concept_RetailPartner"
+    },
+    {
+      "@id": "bank:col_ssn_hash",
+      "@type": "bank:Column",
+      "rdfs:label": "ssn_hash",
+      "representsConcept": "bank:Concept_CustomerIdentity"
+    },
+    {
+      "@id": "bank:col_fico_score",
+      "@type": "bank:Column",
+      "rdfs:label": "fico_score",
+      "representsConcept": "bank:Concept_CreditScore"
+    },
+    {
+      "@id": "bank:col_card_id",
+      "@type": "bank:Column",
+      "rdfs:label": "card_id",
+      "representsConcept": "bank:Concept_CardIdentifier"
+    },
+    {
+      "@id": "bank:Concept_PaymentDelay",
+      "@type": "owl:Class",
+      "businessJargon": ["payment delay", "late payments", "overdue"]
+    },
+    {
+      "@id": "bank:Concept_Debt",
+      "@type": "owl:Class",
+      "businessJargon": ["ENR", "balance", "used amount", "debt", "usage"]
+    },
+    {
+      "@id": "bank:Concept_AvailableCredit",
+      "@type": "owl:Class",
+      "businessJargon": ["OSUC", "unutilized", "limit", "available credit"]
+    },
+    {
+      "@id": "bank:Concept_RetailPartner",
+      "@type": "owl:Class",
+      "businessJargon": ["Amazon", "Target", "partner", "retail", "data_unit", "clients who shop at Target"]
+    },
+    {
+      "@id": "bank:Concept_CustomerIdentity",
+      "@type": "owl:Class",
+      "businessJargon": ["customer name", "client list", "identity", "ssn", "SIN", "clients"]
+    },
+    {
+      "@id": "bank:Concept_CreditScore",
+      "@type": "owl:Class",
+      "businessJargon": ["FICO", "credit score", "bureau refresh"]
+    },
+    {
+      "@id": "bank:Concept_CardIdentifier",
+      "@type": "owl:Class",
+      "businessJargon": ["card number", "account number", "card id"]
+    }
+  ]
+}
