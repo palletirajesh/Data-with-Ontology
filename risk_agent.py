@@ -12,12 +12,13 @@ from databricks import sql
 # --- CONFIGURATION (PASTE YOUR KEY HERE) ---
 # ==========================================
 # Make sure to replace this with your actual Groq API Key!
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
+# Keys are safely stored in Streamlit Secrets
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 
 DB_CONFIG = {
-    "server_hostname": "dbc-77f699f6-0373.cloud.databricks.com", 
-    "http_path": "/sql/1.0/warehouses/15171b6cf0a70633", 
-    "access_token": "dapide1a7848b6a9ec77bd403ebd3ece1672"
+    "server_hostname": st.secrets["DB_SERVER_HOSTNAME"], 
+    "http_path": st.secrets["DB_HTTP_PATH"], 
+    "access_token": st.secrets["DB_ACCESS_TOKEN"]
 }
 
 # --- 1. CORE CONNECTIONS ---
