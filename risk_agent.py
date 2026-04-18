@@ -110,7 +110,7 @@ def generate_sql(user_query, ontology_context):
     """
     
     payload = {
-        "model": "llama3-70b-8192", # Using a highly capable model for SQL
+        "model": "llama-3.3-70b-versatile", # Using a highly capable model for SQL
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1 # Low temperature for strict coding
     }
