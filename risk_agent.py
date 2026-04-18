@@ -2,8 +2,10 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
-import rdflib
+import json
 import io
+import rdflib
+from rdflib import URIRef, Literal, Namespace
 from databricks import sql
 from sentence_transformers import SentenceTransformer, util
 
@@ -86,14 +88,12 @@ def vector_search_schema(user_query, schema_text, top_k=2):
     return retrieved_schema
 
 # ==========================================
-# --- 4. THE LLM SQL GENERATOR ---
+# --- 4. LLM & LEARNING ENGINES ---
 # ==========================================
 def generate_sql(user_query, context):
     url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    
     prompt = f"""You are an expert Databricks SQL data engineer for a bank.
     Write a Databricks SQL query for the user's question based strictly on the provided Context.
 
@@ -114,24 +114,69 @@ def generate_sql(user_query, context):
     8. For the string datatype, convert any case to Upper Case like upper(data_unit) = upper("Amazon')
     """
     
-    payload = {
-        "model": "llama-3.3-70b-versatile", 
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1 
-    }
-    
+    payload = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
     response = requests.post(url, headers=headers, json=payload)
     if response.status_code == 200:
         return response.json()['choices'][0]['message']['content'].strip()
     else:
         raise Exception(f"Groq API Error: {response.text}")
 
+def auto_update_ontology(user_query, original_sql, edited_sql):
+    """Uses LLM to deduce missing mappings and updates the JSON-LD file."""
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    
+    prompt = f"""
+    The user asked: "{user_query}"
+    The AI wrote: {original_sql}
+    The User corrected it to: {edited_sql}
+    
+    Identify the specific business jargon from the user's question, and the exact database column the user mapped it to in their corrected SQL.
+    Respond ONLY with a valid JSON object in this exact format:
+    {{"jargon": "the phrase", "column": "the_table_column"}}
+    """
+    
+    try:
+        response = requests.post(url, headers=headers, json={
+            "model": "llama-3.3-70b-versatile",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"}
+        }).json()
+        
+        learning = json.loads(response['choices'][0]['message']['content'])
+        jargon = learning['jargon'].lower()
+        column = learning['column']
+        
+        g = load_ontology()
+        EX = Namespace("http://example.org/ontology/")
+        concept_uri = EX[f"concept_{jargon.replace(' ', '_')}"]
+        
+        g.add((concept_uri, EX.businessJargon, Literal(jargon)))
+        g.add((concept_uri, EX.mapsToColumn, Literal(column)))
+        g.serialize(destination="knowledge_base.jsonld", format="json-ld")
+        
+        st.cache_resource.clear() 
+        return True, f"🧠 AI Learned! Mapped '{jargon}' to '{column}'."
+    except Exception as e:
+        return False, str(e)
+
 # ==========================================
-# --- 5. THE STREAMLIT UI ---
+# --- 5. STREAMLIT UI & SESSION STATE ---
 # ==========================================
 st.set_page_config(page_title="GenAI Bank Agent", page_icon="🏦", layout="wide")
 
-# --- SIDEBAR: EXCEL DATA DOWNLOAD ---
+# Initialize Session State Variables
+if "last_query" not in st.session_state:
+    st.session_state.last_query = ""
+if "original_sql" not in st.session_state:
+    st.session_state.original_sql = ""
+if "df" not in st.session_state:
+    st.session_state.df = None
+if "final_context" not in st.session_state:
+    st.session_state.final_context = ""
+
+# --- SIDEBAR: EXCEL DOWNLOAD ---
 with st.sidebar:
     st.header("📂 Explore the Data")
     st.write("Download a snapshot of the database to see what kind of questions you can ask.")
@@ -139,24 +184,15 @@ with st.sidebar:
     if st.button("Generate Sample Excel File"):
         with st.spinner("Extracting samples from Databricks..."):
             try:
-                # Pull 50 rows from the core tables
                 df_cust = pd.read_sql("SELECT * FROM gen_ai_bank.dim_customer LIMIT 50", conn)
                 df_ledger = pd.read_sql("SELECT * FROM gen_ai_bank.fact_card_ledger LIMIT 50", conn)
                 
-                # Write to an in-memory Excel file
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                     df_cust.to_excel(writer, sheet_name='Customers', index=False)
                     df_ledger.to_excel(writer, sheet_name='Card_Ledger', index=False)
                 
-                # Provide the download button
-                st.download_button(
-                    label="📥 Download Data.xlsx",
-                    data=buffer.getvalue(),
-                    file_name="additional_data.xlsx",
-                    mime="application/vnd.ms-excel",
-                    type="primary"
-                )
+                st.download_button("📥 Download Data.xlsx", data=buffer.getvalue(), file_name="Bank_Sample_Data.xlsx", mime="application/vnd.ms-excel", type="primary")
             except Exception as e:
                 st.error(f"Failed to fetch sample data: {e}")
 
@@ -166,52 +202,77 @@ st.title("🏦 GenAI Graph-RAG Bank Agent")
 g = load_ontology()
 db_schema = load_database_schema()
 
-user_query = st.text_input("Ask a question about customer risk:", placeholder="e.g. Show me the number of customers, or What is our total ENR?")
+# 1. User Input Area
+user_query = st.text_input("Ask a question about customer risk:", placeholder="e.g. Show me bad debt accounts.")
 
-if user_query:
-    # 1. The Interactive Thought Process Tracker
+# 2. Logic & SQL Generation
+if user_query and user_query != st.session_state.last_query:
+    st.session_state.last_query = user_query
+    st.session_state.df = None # Clear old results
+    
     with st.status("🧠 Analyzing your question...", expanded=True) as status:
-        
         st.write("🔎 **Step 1:** Checking Ontology for strict business jargon...")
-        time.sleep(1) # Slight pause for visual effect
+        time.sleep(0.5) 
+        
         ontology_context = get_ontology_context(user_query, g)
         
         if ontology_context:
             st.success("🎯 **Decision:** Business jargon found! Using Ontology exact match.")
             routing_path = "Ontology Search"
-            final_context = f"{ontology_context}\n\nSchema Fallback:\n{db_schema}"
+            st.session_state.final_context = f"{ontology_context}\n\nSchema Fallback:\n{db_schema}"
         else:
             st.warning("🧲 **Decision:** No strict jargon found. Switching to Vector Semantic Search...")
-            vector_context = vector_search_schema(user_query, db_schema)
-            final_context = vector_context
+            st.session_state.final_context = vector_search_schema(user_query, db_schema)
             st.info("✅ Relevant tables mathematically matched and retrieved.")
             routing_path = "Vector Search"
             
         st.write(f"📝 **Step 2:** Sending context to LLM via {routing_path}...")
         
         try:
-            generated_sql = generate_sql(user_query, final_context)
+            st.session_state.original_sql = generate_sql(user_query, st.session_state.final_context)
             status.update(label=f"✅ Strategy Complete (Routed via {routing_path})", state="complete", expanded=False)
-            
-            # Show the context to the user so they can inspect it
-            with st.expander("View the exact context sent to the LLM"):
-                st.code(final_context, language="markdown")
-                
         except Exception as e:
             status.update(label="❌ API Error", state="error", expanded=True)
             st.error(str(e))
             st.stop()
 
-    # 2. Execution & Results
-    st.success("SQL Generated Successfully!")
-    st.code(generated_sql, language="sql")
+# 3. Interactive Code Editor & Actions
+if st.session_state.original_sql:
+    with st.expander("🔍 View AI Thought Process & Context"):
+        st.code(st.session_state.final_context, language="markdown")
+        
+    st.markdown("### 📝 Review & Edit SQL")
+    edited_sql = st.text_area("Modify the AI's code if necessary before running:", value=st.session_state.original_sql, height=150)
     
-    with st.spinner("⚡ Fetching data from Databricks..."):
-        exec_start = time.time()
-        try:
-            df = pd.read_sql(generated_sql, conn)
-            st.markdown("### 📊 Query Results")
-            st.dataframe(df, use_container_width=True)
-            st.caption(f"Data retrieved in {round(time.time() - exec_start, 2)}s")
-        except Exception as e:
-            st.error(f"❌ Databricks Execution Error: {str(e)}")
+    col_run, col_learn = st.columns([1, 1])
+    
+    with col_run:
+        if st.button("▶️ Execute Query", type="primary"):
+            with st.spinner("⚡ Fetching data from Databricks..."):
+                try:
+                    exec_start = time.time()
+                    st.session_state.df = pd.read_sql(edited_sql, conn)
+                    st.success(f"✅ Data retrieved in {round(time.time() - exec_start, 2)}s")
+                except Exception as e:
+                    st.error(f"❌ SQL Execution Error: {str(e)}")
+                    st.session_state.df = None
+                    
+    with col_learn:
+        # Check if the user changed the text
+        if edited_sql.strip() != st.session_state.original_sql.strip():
+            st.warning("⚠️ You modified the AI's query.")
+            if st.button("🕸️ Teach AI your edits (Update Ontology)"):
+                with st.spinner("Wiring new semantic edges into the Knowledge Graph..."):
+                    success, msg = auto_update_ontology(st.session_state.last_query, st.session_state.original_sql, edited_sql)
+                    if success:
+                        st.success(msg)
+                        st.session_state.original_sql = edited_sql # Reset so button hides
+                        time.sleep(1.5)
+                        st.rerun()
+                    else:
+                        st.error(f"Failed to update ontology: {msg}")
+
+# 4. Results Table
+if st.session_state.df is not None:
+    st.markdown("### 📊 Query Results")
+    st.dataframe(st.session_state.df, use_container_width=True)
