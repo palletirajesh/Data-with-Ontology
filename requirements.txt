@@ -1,5 +1,6 @@
 streamlit
-pandas<2.2.0
+pandas
 requests
 rdflib
-databricks-sql-connector
+databricks-sql-connector>=3.3.0
+pyarrow>=15.0.0
