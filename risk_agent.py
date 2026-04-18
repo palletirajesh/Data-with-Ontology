@@ -107,14 +107,8 @@ def generate_sql(user_query, context):
     {user_query}
 
     Rules:
-    1. ONLY use the Tables and Columns explicitly provided in the ONTOLOGY SCHEMA MATCHES above.
-    2. If MANDATORY JOIN RULES are provided, you MUST use them exactly as written. If no join rules are provided but multiple tables exist, join them logically.
-    3. Output ONLY the raw SQL code. No markdown, no explanations.
-    4. SEQUENCE YOUR JOINS LOGICALLY. You cannot reference a table alias in an ON clause until that table has been introduced. If dim_customer is provided as a Bridge Table, start your FROM clause there.
-    5. If the user asks for a column or metric that cannot be calculated from the given columns, output exactly: "I cannot answer this with the available data."
-    6. TRANSLATION: Do NOT copy the user's words into the SQL. If the user asks for "payment delay", you MUST translate that to the exact column 'days_past_due'.
-    7. Output ONLY the raw SQL code. No markdown, no explanations.
-    8. For the string datatype, convert any case to Upper Case like upper(data_unit) = upper("Amazon')
+    1. Only return the raw SQL code. No markdown formatting, no explanations, no backticks.
+    2. Use the provided tables and columns. Do not hallucinate columns.
     """
     
     payload = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
