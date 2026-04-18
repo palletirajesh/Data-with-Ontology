@@ -90,8 +90,14 @@ def generate_sql(user_query, ontology_context, database_schema):
     {user_query}
 
     Rules:
-    1. Only return the raw SQL code. No markdown formatting, no explanations, no backticks.
-    2. Ensure the SQL is compatible with Databricks.
+     1. ONLY use tables: gen_ai_bank.dim_customer (c), gen_ai_bank.fact_card_ledger (l), gen_ai_bank.dim_card_association (a), gen_ai_bank.fact_credit_bureau (f).
+    2. NEVER use names like 'customer' or 'loyalty_card'. Use the 3-part names above.
+    3. COLUMN WHITELIST: You may ONLY use the exact column names printed in the GROUNDING METADATA above. 
+    4. If the user asks for a column or metric that cannot be calculated from the given columns, output exactly: "I cannot answer this with the available data."
+    5. If the user mentions 'Amazon' or 'Target', join gen_ai_bank.dim_card_association.
+    6. TRANSLATION: Do NOT copy the user's words into the SQL. If the user asks for "payment delay", you MUST translate that to the exact column 'days_past_due'.
+    7. Output ONLY the raw SQL code. No markdown, no explanations.
+    8. For the string datatype, convert any case to Upper Case like upper(data_unit) = upper("Amazon')
     """
     
     payload = {
