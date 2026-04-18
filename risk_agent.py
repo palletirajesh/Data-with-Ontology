@@ -21,7 +21,7 @@ DB_CONFIG = {
 }
 
 # ==========================================
-# --- 2. CORE CONNECTIONS & FILE LOADERS ---
+# --- 2. CORE CONNECTIONS & LOADERS ---
 # ==========================================
 @st.cache_resource
 def get_db_connection():
@@ -30,13 +30,27 @@ def get_db_connection():
 conn = get_db_connection()
 
 @st.cache_resource
-def load_ontology():
+def load_vector_model():
+    # tiny but powerful model for finding semantic similarity
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
+@st.cache_resource
+def load_ontology_as_list():
+    """Converts Graph Triples into searchable semantic strings"""
     g = rdflib.Graph()
     try:
         g.parse("knowledge_base.jsonld", format="json-ld")
+        rules = []
+        EX = Namespace("http://example.org/ontology/")
+        # Extract every jargon mapping as a descriptive sentence for the vector model
+        for s, p, o in g.triples((None, EX.businessJargon, None)):
+            jargon = str(o)
+            for _, _, col in g.triples((s, EX.mapsToColumn, None)):
+                rules.append(f"Business Jargon: '{jargon}' maps to Database Column: {str(col)}")
+        return rules
     except Exception as e:
         st.error(f"Failed to load Ontology: {e}")
-    return g
+        return []
 
 @st.cache_resource
 def load_database_schema():
@@ -46,60 +60,48 @@ def load_database_schema():
     except FileNotFoundError:
         return ""
 
-@st.cache_resource
-def load_vector_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')
-
 # ==========================================
-# --- 3. THE ROUTING ENGINES ---
+# --- 3. THE SEMANTIC SEARCH ENGINE ---
 # ==========================================
-def get_ontology_context(user_query, g):
-    query_lower = user_query.lower()
-    matched_concepts = []
-    
-    for s, p, o in g.triples((None, rdflib.URIRef("http://example.org/ontology/businessJargon"), None)):
-        jargon_term = str(o).lower()
-        if jargon_term in query_lower:
-            matched_concepts.append(s)
-
-    if not matched_concepts:
-        return None 
-
-    formatted_context = "Proprietary Jargon Matched:\n"
-    for concept in matched_concepts:
-        for _, _, col in g.triples((concept, rdflib.URIRef("http://example.org/ontology/mapsToColumn"), None)):
-            formatted_context += f"- Map '{concept.split('/')[-1]}' to column: {col}\n"
-            
-    return formatted_context
-
-# Uses top_k=4 to handle complex multi-table queries
-def vector_search_schema(user_query, schema_text, top_k=4):
+def semantic_context_retrieval(user_query, ontology_rules, schema_text, top_k_rules=3, top_k_tables=3):
+    """
+    Finds the nearest business rules (Ontology) AND nearest tables (Schema) 
+    using vector similarity instead of exact matching.
+    """
     model = load_vector_model()
-    chunks = ["### TABLE:" + t for t in schema_text.split("### TABLE:")[1:]]
-    if not chunks:
-        return "Error parsing schema file."
+    query_emb = model.encode(user_query)
 
-    query_embedding = model.encode(user_query)
-    chunk_embeddings = model.encode(chunks)
-    hits = util.semantic_search(query_embedding, chunk_embeddings, top_k=top_k)[0]
+    # --- Search Layer 1: Semantic Jargon/Ontology ---
+    matched_ontology = "Relevant Business Rules (Semantic Match):\n"
+    if ontology_rules:
+        rule_embs = model.encode(ontology_rules)
+        rule_hits = util.semantic_search(query_emb, rule_embs, top_k=top_k_rules)[0]
+        for hit in rule_hits:
+            if hit['score'] > 0.40: # Threshold to ensure relevance
+                matched_ontology += f"- {ontology_rules[hit['corpus_id']]}\n"
+
+    # --- Search Layer 2: Semantic Schema ---
+    table_chunks = ["### TABLE:" + t for t in schema_text.split("### TABLE:")[1:]]
+    table_embs = model.encode(table_chunks)
+    table_hits = util.semantic_search(query_emb, table_embs, top_k=top_k_tables)[0]
     
-    retrieved_schema = "Vector Search Retrieved Tables:\n"
-    for hit in hits:
-        retrieved_schema += chunks[hit['corpus_id']] + "\n\n"
-        
-    return retrieved_schema
+    matched_schema = "Relevant Database Tables:\n"
+    for hit in table_hits:
+        matched_schema += f"{table_chunks[hit['corpus_id']]}\n\n"
+
+    return matched_ontology + "\n" + matched_schema
 
 # ==========================================
-# --- 4. LLM & LEARNING ENGINES ---
+# --- 4. LLM & UI LOGIC ---
 # ==========================================
 def generate_sql(user_query, context):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     
-    prompt = f"""You are an expert Databricks SQL data engineer for a bank.
-    Write a Databricks SQL query for the user's question based strictly on the provided Context.
-
-    [Context Provided by Search Engine]:
+    prompt = f"""You are an expert Databricks SQL data engineer.
+    Write a SQL query based on the Semantic Context provided.
+    
+    [Context]:
     {context}
 
     [User Question]:
@@ -121,168 +123,59 @@ def generate_sql(user_query, context):
     
     if response.status_code == 200:
         raw_output = response.json()['choices'][0]['message']['content'].strip()
-        # Bulletproof cleanup to remove markdown formatting safely
-        cleaned_sql = raw_output.replace("```sql", "").replace("```", "").strip()
-        return cleaned_sql
-    else:
-        raise Exception(f"Groq API Error: {response.text}")
-
-def auto_update_ontology(user_query, original_sql, edited_sql):
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    
-    prompt = f"""
-    The user asked: "{user_query}"
-    The AI wrote: {original_sql}
-    The User corrected it to: {edited_sql}
-    
-    Identify the specific business jargon from the user's question, and the exact database column the user mapped it to in their corrected SQL.
-    Respond ONLY with a valid JSON object in this exact format:
-    {{"jargon": "the phrase", "column": "the_table_column"}}
-    """
-    
-    try:
-        response = requests.post(url, headers=headers, json={
-            "model": "llama-3.3-70b-versatile",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.0,
-            "response_format": {"type": "json_object"}
-        }).json()
-        
-        learning = json.loads(response['choices'][0]['message']['content'])
-        jargon = learning['jargon'].lower()
-        column = learning['column']
-        
-        g = load_ontology()
-        EX = Namespace("http://example.org/ontology/")
-        concept_uri = EX[f"concept_{jargon.replace(' ', '_')}"]
-        
-        g.add((concept_uri, EX.businessJargon, Literal(jargon)))
-        g.add((concept_uri, EX.mapsToColumn, Literal(column)))
-        g.serialize(destination="knowledge_base.jsonld", format="json-ld")
-        
-        st.cache_resource.clear() 
-        return True, f"🧠 AI Learned! Mapped '{jargon}' to '{column}'."
-    except Exception as e:
-        return False, str(e)
+        # Clean up accidental markdown blocks
+        return raw_output.replace("```sql", "").replace("```", "").strip()
+    return f"Error: {response.text}"
 
 # ==========================================
-# --- 5. UI SESSION STATE ---
+# --- 5. UI & SESSION STATE ---
 # ==========================================
-if "last_query" not in st.session_state:
-    st.session_state.last_query = ""
-if "original_sql" not in st.session_state:
-    st.session_state.original_sql = ""
-if "df" not in st.session_state:
-    st.session_state.df = None
-if "final_context" not in st.session_state:
-    st.session_state.final_context = ""
-if "routing_path" not in st.session_state:
-    st.session_state.routing_path = ""
+if "df" not in st.session_state: st.session_state.df = None
+if "sql" not in st.session_state: st.session_state.sql = ""
+if "context" not in st.session_state: st.session_state.context = ""
 
-# ==========================================
-# --- 6. FRONTEND LAYOUT ---
-# ==========================================
+st.title("🏦 Hybrid Semantic Bank Agent")
 
-# --- SIDEBAR: STATIC EXCEL DOWNLOAD ---
-with st.sidebar:
-    st.header("📂 Explore the Data")
-    st.markdown("Download a static snapshot of the database to see what kind of questions you can ask.")
-    
-    try:
-        # Reads the static file directly from your GitHub repo
-        with open("additional_data.xlsx", "rb") as file:
-            st.download_button(
-                label="📥 Download Data.xlsx",
-                data=file,
-                file_name="Bank_Sample_Data.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True
-            )
-    except FileNotFoundError:
-        st.warning("⚠️ 'additional_data.xlsx' not found. Please upload it to your repository.")
-
-# --- MAIN HEADER & INPUT ---
-st.title("🏦 GenAI Graph-RAG Bank Agent")
-
-g = load_ontology()
+# Load external data
+ontology_rules = load_ontology_as_list()
 db_schema = load_database_schema()
 
-# Clean, full-width input box
-user_query = st.text_input("Ask a question about customer risk:", placeholder="e.g. Show me bad debt accounts.")
+user_query = st.text_input("Ask a question about customer risk:", placeholder="e.g., customers with amazon account and due > 5000")
 
-# --- HORIZONTAL SPLIT LAYOUT ---
-# Left column takes 35% of the screen, Right column takes 65%
-col_left, col_spacer, col_right = st.columns([3.5, 0.5, 6])
+if user_query:
+    with st.status("🧠 Searching Business Rules & Schema Semantically...") as status:
+        # Perform Vector Search for both the rules and the tables
+        st.session_state.context = semantic_context_retrieval(user_query, ontology_rules, db_schema)
+        st.session_state.sql = generate_sql(user_query, st.session_state.context)
+        status.update(label="✅ Strategy: Semantic RAG complete", state="complete", expanded=False)
 
-if user_query and user_query != st.session_state.last_query:
-    st.session_state.last_query = user_query
-    st.session_state.df = None
+    # Layout: Left column for SQL, Right for Data
+    col_left, col_right = st.columns([4, 6])
     
     with col_left:
-        with st.status("🧠 Analyzing your question...", expanded=True) as status:
-            ontology_context = get_ontology_context(user_query, g)
-            
-            if ontology_context:
-                st.session_state.routing_path = "Ontology Search"
-                st.session_state.final_context = f"{ontology_context}\n\nSchema Fallback:\n{db_schema}"
-                status.update(label="✅ Strategy: Ontology Exact Match", state="complete", expanded=False)
-            else:
-                st.session_state.routing_path = "Vector Search"
-                st.session_state.final_context = vector_search_schema(user_query, db_schema)
-                status.update(label="✅ Strategy: Vector Semantic Search", state="complete", expanded=False)
-                
-            try:
-                st.session_state.original_sql = generate_sql(user_query, st.session_state.final_context)
-            except Exception as e:
-                st.error(str(e))
-                st.stop()
-
-# --- POPULATE COLUMNS ---
-if st.session_state.original_sql:
-    
-    # LEFT COLUMN: Logic, Code Editing, and Learning
-    with col_left:
-        st.markdown("### 📝 Code Editor")
-        
-        edited_sql = st.text_area(
-            "Modify the AI's SQL code:", 
-            value=st.session_state.original_sql, 
-            height=200,
-            label_visibility="collapsed"
-        )
+        st.markdown("### 📝 SQL Code")
+        edited_sql = st.text_area("Review/Edit SQL:", value=st.session_state.sql, height=200)
         
         if st.button("▶️ Execute Query", type="primary", use_container_width=True):
-            with st.spinner("Fetching data..."):
-                try:
-                    st.session_state.df = pd.read_sql(edited_sql, conn)
-                except Exception as e:
-                    st.error(f"❌ SQL Execution Error: {str(e)}")
-                    st.session_state.df = None
-                    
-        # Teacher Agent Block
-        if edited_sql.strip() != st.session_state.original_sql.strip():
-            st.warning("⚠️ You modified the AI's query.")
-            if st.button("🕸️ Teach AI your edits", use_container_width=True):
-                with st.spinner("Wiring new semantic edges..."):
-                    success, msg = auto_update_ontology(st.session_state.last_query, st.session_state.original_sql, edited_sql)
-                    if success:
-                        st.success(msg)
-                        st.session_state.original_sql = edited_sql
-                        time.sleep(1.5)
-                        st.rerun()
-                    else:
-                        st.error(msg)
-                        
-        with st.expander("🔍 View AI Context Payload"):
-            st.code(st.session_state.final_context, language="markdown")
+            try:
+                st.session_state.df = pd.read_sql(edited_sql, conn)
+            except Exception as e:
+                st.error(f"SQL Error: {e}")
 
-    # RIGHT COLUMN: Data Results
+        with st.expander("🔍 View Semantic Context Payload"):
+            st.info(st.session_state.context)
+
     with col_right:
-        dynamic_height = min((len(st.session_state.df) + 1) * 35, 500)
         st.markdown("### 📊 Query Results")
         if st.session_state.df is not None:
-            st.dataframe(st.session_state.df, use_container_width=True, height=dynamic_height)
+            st.dataframe(st.session_state.df, use_container_width=True)
         else:
-            st.info("👈 Run the query to see the resulting data here.")
+            st.info("Results will appear here once query is executed.")
+
+# Sidebar Download
+with st.sidebar:
+    st.header("📂 Data Resources")
+    try:
+        with open("additional_data.xlsx", "rb") as f:
+            st.download_button("📥 Download Sample Data", f, "Bank_Data.xlsx", type="secondary")
+    except: pass
