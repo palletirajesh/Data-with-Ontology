@@ -9,10 +9,9 @@ import os
 from databricks import sql
 
 # ==========================================
-# --- CONFIGURATION (PASTE YOUR KEY HERE) ---
+# --- 1. CONFIGURATION & SECRETS ---
 # ==========================================
-# Make sure to replace this with your actual Groq API Key!
-# Keys are safely stored in Streamlit Secrets
+# Make sure your Streamlit Secrets or secrets.toml match these keys exactly!
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 
 DB_CONFIG = {
@@ -21,7 +20,22 @@ DB_CONFIG = {
     "access_token": st.secrets["DB_ACCESS_TOKEN"]
 }
 
-# --- 1. CORE CONNECTIONS ---
+# ==========================================
+# --- 2. DATABASE SCHEMA (CRITICAL FOR HYBRID AI) ---
+# ==========================================
+# The LLM needs this map so it knows what tables exist when the ontology is empty.
+# Update this to match your actual Databricks tables!
+DATABASE_SCHEMA = """
+Table: customers
+Columns: customer_id (string), name (string), risk_score (integer), location (string)
+
+Table: transactions
+Columns: transaction_id (string), customer_id (string), amount (decimal), delay_days (integer), status (string)
+"""
+
+# ==========================================
+# --- 3. CORE CONNECTIONS ---
+# ==========================================
 @st.cache_resource
 def get_db_connection():
     return sql.connect(**DB_CONFIG)
@@ -38,248 +52,113 @@ def load_ontology():
         st.error(f"Failed to load Ontology: {e}")
     return g
 
-# --- 2. ONTOLOGY ENGINE ---
+# ==========================================
+# --- 4. THE HYBRID ONTOLOGY ENGINE ---
+# ==========================================
 def get_ontology_context(user_query, g):
-    """Multi-Hop Reasoning: Jargon -> Concept -> Column -> Table -> Explicit Joins"""
-    user_query_lower = user_query.lower()
-    matched_concepts = set()
-    bank = rdflib.Namespace("http://gen_ai_bank.com/ontology#")
+    """Searches the graph. If it fails, it returns a soft fallback instead of an error."""
+    # Convert query to lowercase for simple matching
+    query_lower = user_query.lower()
     
-    # Hop 1: Find matched business jargon in the graph
-    for concept, _, jargon in g.triples((None, bank.businessJargon, None)):
-        if str(jargon).lower() in user_query_lower:
-            matched_concepts.add(concept)
-            
+    # 1. Extract concepts dynamically based on the graph
+    # (Assuming you have businessJargon nodes in your JSON-LD)
+    matched_concepts = []
+    for s, p, o in g.triples((None, rdflib.URIRef("http://example.org/ontology/businessJargon"), None)):
+        jargon_term = str(o).lower()
+        if jargon_term in query_lower:
+            matched_concepts.append(s)
+
+    # 2. THE HYBRID FALLBACK: If no exact jargon is found, don't crash!
     if not matched_concepts:
-        return "ERROR: No semantic concepts recognized in the query."
+        return "No proprietary business rules found in the ontology for this query. Rely strictly on standard SQL knowledge and the provided Database Schema."
 
-    # Hop 2 & 3: SPARQL Traversal to find Tables, Columns, AND Explicit Joins
-    values_clause = " ".join([f"<{str(c)}>" for c in matched_concepts])
+    # 3. If concepts ARE found, build the strict context (Multi-Hop)
+    formatted_graph_context = "Proprietary Business Rules Found:\n"
+    for concept in matched_concepts:
+        # Example: Find the table and column mapped to this concept
+        for _, _, col in g.triples((concept, rdflib.URIRef("http://example.org/ontology/mapsToColumn"), None)):
+            formatted_graph_context += f"- Map '{concept.split('/')[-1]}' to column: {col}\n"
+            
+    return formatted_graph_context
+
+# ==========================================
+# --- 5. THE LLM SQL GENERATOR ---
+# ==========================================
+def generate_sql(user_query, ontology_context):
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
     
-    sparql_query = f"""
-    PREFIX bank: <http://gen_ai_bank.com/ontology#>
-    PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-    
-    SELECT DISTINCT ?tableLabel ?colLabel ?targetTableLabel ?sourceKey ?targetKey
-    WHERE {{
-        VALUES ?concept {{ {values_clause} }}
-        ?col bank:representsConcept ?concept .
-        ?table bank:hasColumn ?col .
-        ?table rdfs:label ?tableLabel .
-        ?col rdfs:label ?colLabel .
-        
-        # Optional: Pull explicit join definitions if this table has them
-        OPTIONAL {{
-            ?table bank:joinsWith ?joinObj .
-            ?joinObj bank:targetTable ?tTable .
-            ?tTable rdfs:label ?targetTableLabel .
-            ?joinObj bank:sourceKey ?sourceKey .
-            ?joinObj bank:targetKey ?targetKey .
-        }}
-    }}
+    prompt = f"""You are an expert Databricks SQL data engineer for a bank.
+    Your job is to translate the user's natural language question into a valid Databricks SQL query.
+
+    [Database Schema]:
+    {DATABASE_SCHEMA}
+
+    [Ontology Business Rules]:
+    {ontology_context}
+
+    [User Question]:
+    {user_query}
+
+    Rules:
+    1. Only return the raw SQL code. No markdown formatting, no explanations, no backticks.
+    2. Ensure the SQL is compatible with Databricks.
+    3. If Ontology Business Rules exist, you MUST follow them. If they say "No proprietary rules found", rely entirely on the Database Schema.
     """
     
-    results = g.query(sparql_query)
+    payload = {
+        "model": "llama3-70b-8192", # Using a highly capable model for SQL
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1 # Low temperature for strict coding
+    }
     
-    # Format the exact logical schema for the LLM
-    schemas = {}
-    joins = set()
+    response = requests.post(url, headers=headers, json=payload)
     
-    for row in results:
-        t_name = str(row.tableLabel)
-        c_name = str(row.colLabel)
-        
-        if t_name not in schemas:
-            schemas[t_name] = set()
-        schemas[t_name].add(c_name)
-        
-        # If the SPARQL query found an explicit join rule, save it
-        if row.targetTableLabel:
-            target_name = str(row.targetTableLabel)
-            s_key = str(row.sourceKey)
-            t_key = str(row.targetKey)
-            
-            join_rule = f"JOIN {t_name} TO {target_name} ON {s_key} = {t_key}"
-            joins.add(join_rule)
-            
-            # THE FIX: Automatically grant the LLM permission to use the join keys!
-            schemas[t_name].add(s_key)
-            if target_name not in schemas:
-                schemas[target_name] = set()
-            schemas[target_name].add(t_key)
-            
-    # --- THESE ARE THE LINES THAT GOT DELETED ---
-    context = "ONTOLOGY SCHEMA MATCHES:\n"
-    for table, cols in schemas.items():
-        context += f"TABLE: {table}\nREQUIRED COLUMNS: {', '.join(cols)}\n\n"
-        
-    if joins:
-        context += "MANDATORY JOIN RULES:\n"
-        for j in joins:
-            context += f"- {j}\n"
-            
-    return context.strip()
+    if response.status_code == 200:
+        return response.json()['choices'][0]['message']['content'].strip()
+    else:
+        raise Exception(f"Groq API Error: {response.text}")
 
-# --- 3. SQL GENERATION ---
-def generate_sql(user_query, context):
-    prompt = f"""
-    SYSTEM: You are a Databricks SQL Expert powered by an RDF Ontology.
-    
-    {context}
-    
-    STRICT RULES:
-    1. ONLY use the Tables and Columns explicitly provided in the ONTOLOGY SCHEMA MATCHES above.
-    2. If MANDATORY JOIN RULES are provided, you MUST use them exactly as written. If no join rules are provided but multiple tables exist, join them logically.
-    3. Output ONLY the raw SQL code. No markdown, no explanations.
-    4. SEQUENCE YOUR JOINS LOGICALLY. You cannot reference a table alias in an ON clause until that table has been introduced. If dim_customer is provided as a Bridge Table, start your FROM clause there.
-    5. If the user asks for a column or metric that cannot be calculated from the given columns, output exactly: "I cannot answer this with the available data."
-    6. TRANSLATION: Do NOT copy the user's words into the SQL. If the user asks for "payment delay", you MUST translate that to the exact column 'days_past_due'.
-    7. Output ONLY the raw SQL code. No markdown, no explanations.
-    8. For the string datatype, convert any case to Upper Case like upper(data_unit) = upper("Amazon')
-    
-    QUESTION: {user_query}
-    SQL:"""
-    
-    start = time.time()
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": prompt}], "temperature": 0.0}
-    
-    response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload).json()
-    latency = time.time() - start
-    
-    if 'error' in response: 
-        return f"API ERROR: {response['error']['message']}", latency
-        
-    raw_sql = response['choices'][0]['message']['content']
-    clean_sql = re.sub(r'```sql|```', '', raw_sql).strip()
-    return clean_sql.split(";")[0] + ";", latency
+# ==========================================
+# --- 6. THE STREAMLIT UI ---
+# ==========================================
+st.set_page_config(page_title="GenAI Bank Agent", page_icon="🏦", layout="wide")
+st.title("🏦 GenAI Graph-RAG Bank Agent")
+st.markdown("Ask natural language questions. The AI will use our semantic ontology and database schema to write Databricks SQL.")
 
-# --- 4. GRAPH META-AGENT (Self-Healing Ontology) ---
-def auto_update_ontology(user_query, bad_sql, good_sql):
-    with open("knowledge_base.jsonld", "r") as f:
-        kb = json.load(f)
-        
-    # Get all valid OWL Classes (Concepts) from the JSON-LD
-    valid_concepts = [node["@id"] for node in kb["@graph"] if node.get("@type") == "owl:Class"]
-        
-    prompt = f"""
-    SYSTEM: You are a Semantic Web Administrator managing an OWL Ontology.
-    User asked: "{user_query}"
-    AI generated: {bad_sql}
-    User fixed it to: {good_sql}
-    
-    Identify the semantic concept the user had to map their jargon to.
-    
-    RULES:
-    1. You MUST choose EXACTLY ONE valid ID from this list: {valid_concepts}
-    
-    Return ONLY a valid JSON object matching this structure. NO markdown:
-    {{"jargon": "the raw word user typed", "concept_id": "valid_id_here"}}
-    """
-    
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": prompt}], "temperature": 0.0}
-    
-    try:
-        response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload).json()
-        raw_resp = re.sub(r'```json|```', '', response['choices'][0]['message']['content']).strip()
-        new_hook = json.loads(raw_resp)
-        
-        concept_id = new_hook.get("concept_id", "")
-        jargon = new_hook.get("jargon", "")
-        
-        if concept_id not in valid_concepts:
-            return False, f"Agent hallucinated concept: {concept_id}"
-            
-        # Update the JSON-LD Graph natively
-        for node in kb["@graph"]:
-            if node.get("@id") == concept_id:
-                if "businessJargon" not in node:
-                    node["businessJargon"] = []
-                if jargon not in node["businessJargon"]:
-                    node["businessJargon"].append(jargon)
-                break
-                
-        with open("knowledge_base.jsonld", "w") as f:
-            json.dump(kb, f, indent=2)
-            
-        # Clear Streamlit cache so the new graph is loaded on next run
-        st.cache_resource.clear()
-            
-        return True, f"Mapped '{jargon}' to {concept_id}"
-        
-    except Exception as e:
-        return False, f"System Error: {str(e)}"
-
-# --- 5. INTERACTIVE UI ---
-st.set_page_config(layout="wide", page_title="GenAI Graph Agent")
-st.title("🏦 GenAI Bank Agent (Human-in-the-Loop 🕸️)")
-
+# Load Graph
 g = load_ontology()
 
-# State Management
-if "current_sql" not in st.session_state: st.session_state.current_sql = ""
-if "original_sql" not in st.session_state: st.session_state.original_sql = ""
-if "last_query" not in st.session_state: st.session_state.last_query = ""
-if "df" not in st.session_state: st.session_state.df = None
-if "gen_time" not in st.session_state: st.session_state.gen_time = 0.0
+# User Input
+user_query = st.text_input("Ask a question about customer risk:", placeholder="e.g., How many customers do we have? OR Show high-risk customers.")
 
-# 1. The Input
-user_query = st.text_input("Ask a question about customer risk (Press Enter to Generate):", placeholder="e.g., Show Amazon customers with a payment delay")
-
-# 2. The Generation Step
-if user_query and user_query != st.session_state.last_query:
-    st.session_state.last_query = user_query 
-    st.session_state.df = None # Clear old data
-    
-    with st.spinner("🧠 Traversing Ontology & Generating SQL..."):
-        context = get_ontology_context(user_query, g)
-        if "ERROR" in context:
-            st.error(context)
-            st.session_state.current_sql = ""
-        else:
-            st.session_state.current_sql, st.session_state.gen_time = generate_sql(user_query, context)
-            st.session_state.original_sql = st.session_state.current_sql
-
-# 3. The Review & Execute Step
-if st.session_state.current_sql:
-    st.subheader("📜 Review AI-Generated SQL")
-    
-    # Editable text area showing the SQL
-    edited_sql = st.text_area("You can edit the query below before executing:", value=st.session_state.current_sql, height=150)
-    
-    col_run, col_learn = st.columns(2)
-    
-    # EXECUTION BUTTON
-    with col_run:
-        if st.button("▶️ Execute Query on Databricks", type="primary"):
-            with st.spinner("⚡ Executing on Databricks..."):
-                try:
-                    exec_start = time.time()
-                    st.session_state.df = pd.read_sql(edited_sql, conn)
-                    st.session_state.current_sql = edited_sql # Save the exact code that was run
-                    st.success(f"✅ Data retrieved in {round(time.time() - exec_start, 2)}s")
-                except Exception as e:
-                    st.error(f"❌ SQL Execution Error: {str(e)}")
-                    st.session_state.df = None
-                    
-    # LEARNING BUTTON (Only appears if the code was manually changed)
-    with col_learn:
-        if edited_sql.strip() != st.session_state.original_sql.strip():
-            st.warning("⚠️ You modified the AI's query.")
-            if st.button("🕸️ Teach AI your edits (Update Ontology)"):
-                with st.spinner("Wiring new semantic edges..."):
-                    success, result = auto_update_ontology(st.session_state.last_query, st.session_state.original_sql, edited_sql)
-                    if success:
-                        st.success(result)
-                        st.session_state.original_sql = edited_sql # Reset to hide button
-                        time.sleep(1.5)
-                        st.rerun()
-                    else:
-                        st.error(f"Failed to learn: {result}")
-
-# 4. The Results Display
-if st.session_state.df is not None:
-    st.markdown("---")
-    st.subheader("📊 Databricks Results")
-    st.dataframe(st.session_state.df, use_container_width=True)
+if user_query:
+    with st.spinner("🧠 Consulting the Ontology and generating SQL..."):
+        
+        # 1. Check the Ontology (Hybrid Approach)
+        ontology_context = get_ontology_context(user_query, g)
+        
+        with st.expander("🔍 See AI Thought Process (Ontology Context)"):
+            st.info(ontology_context)
+            
+        try:
+            # 2. Generate SQL
+            generated_sql = generate_sql(user_query, ontology_context)
+            
+            st.success("SQL Generated Successfully!")
+            st.code(generated_sql, language="sql")
+            
+            # 3. Execute SQL
+            with st.spinner("⚡ Fetching data from Databricks..."):
+                exec_start = time.time()
+                df = pd.read_sql(generated_sql, conn)
+                
+                st.markdown("### 📊 Results")
+                st.dataframe(df, use_container_width=True)
+                st.caption(f"Data retrieved in {round(time.time() - exec_start, 2)}s")
+                
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
