@@ -3,9 +3,11 @@ import pandas as pd
 import requests
 import time
 import json
-import io
+import re
 import rdflib
-import re 
+from rdflib import URIRef, Literal, Namespace
+from databricks import sql
+from sentence_transformers import SentenceTransformer, util
 
 # ==========================================
 # --- 1. CONFIGURATION & SECRETS ---
@@ -71,7 +73,8 @@ def get_ontology_context(user_query, g):
             
     return formatted_context
 
-def vector_search_schema(user_query, schema_text, top_k=6):
+# Updated top_k to 4 to handle complex multi-table queries
+def vector_search_schema(user_query, schema_text, top_k=4):
     model = load_vector_model()
     chunks = ["### TABLE:" + t for t in schema_text.split("### TABLE:")[1:]]
     if not chunks:
@@ -116,166 +119,11 @@ def generate_sql(user_query, context):
     
     payload = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
     response = requests.post(url, headers=headers, json=payload)
+    
     if response.status_code == 200:
-        return response.json()['choices'][0]['message']['content'].strip()
-    else:
-        raise Exception(f"Groq API Error: {response.text}")
+        raw_output = response.json()['choices'][0]['message']['content'].strip()
+        # Clean out any accidental markdown blocks the LLM might have added
+        cleaned_sql = re.sub(r"^
+http://googleusercontent.com/immersive_entry_chip/0
 
-def auto_update_ontology(user_query, original_sql, edited_sql):
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    
-    prompt = f"""
-    The user asked: "{user_query}"
-    The AI wrote: {original_sql}
-    The User corrected it to: {edited_sql}
-    
-    Identify the specific business jargon from the user's question, and the exact database column the user mapped it to in their corrected SQL.
-    Respond ONLY with a valid JSON object in this exact format:
-    {{"jargon": "the phrase", "column": "the_table_column"}}
-    """
-    
-    try:
-        response = requests.post(url, headers=headers, json={
-            "model": "llama-3.3-70b-versatile",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.0,
-            "response_format": {"type": "json_object"}
-        }).json()
-        
-        learning = json.loads(response['choices'][0]['message']['content'])
-        jargon = learning['jargon'].lower()
-        column = learning['column']
-        
-        g = load_ontology()
-        EX = Namespace("http://example.org/ontology/")
-        concept_uri = EX[f"concept_{jargon.replace(' ', '_')}"]
-        
-        g.add((concept_uri, EX.businessJargon, Literal(jargon)))
-        g.add((concept_uri, EX.mapsToColumn, Literal(column)))
-        g.serialize(destination="knowledge_base.jsonld", format="json-ld")
-        
-        st.cache_resource.clear() 
-        return True, f"🧠 AI Learned! Mapped '{jargon}' to '{column}'."
-    except Exception as e:
-        return False, str(e)
-
-# ==========================================
-# --- 5. UI SESSION STATE ---
-# ==========================================
-if "last_query" not in st.session_state:
-    st.session_state.last_query = ""
-if "original_sql" not in st.session_state:
-    st.session_state.original_sql = ""
-if "df" not in st.session_state:
-    st.session_state.df = None
-if "final_context" not in st.session_state:
-    st.session_state.final_context = ""
-if "routing_path" not in st.session_state:
-    st.session_state.routing_path = ""
-
-# ==========================================
-# --- 6. FRONTEND LAYOUT ---
-# ==========================================
-
-# --- SIDEBAR: STATIC EXCEL DOWNLOAD ---
-with st.sidebar:
-    st.header("📂 Explore the Data")
-    st.markdown("Download a static snapshot of the database to see what kind of questions you can ask.")
-    
-    try:
-        # Reads the static file directly from your GitHub repo / local directory
-        with open("additional_data.xlsx", "rb") as file:
-            st.download_button(
-                label="📥 Download Data.xlsx",
-                data=file,
-                file_name="Bank_Sample_Data.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True
-            )
-    except FileNotFoundError:
-        st.warning("⚠️ 'additional_data.xlsx' not found. Please upload it to your repository.")
-
-# --- MAIN HEADER & INPUT ---
-st.title("🏦 GenAI Graph-RAG Bank Agent")
-
-g = load_ontology()
-db_schema = load_database_schema()
-
-# Clean, full-width input box
-user_query = st.text_input("Ask a question about customer risk:", placeholder="e.g. Show me bad debt accounts.")
-
-# --- HORIZONTAL SPLIT LAYOUT ---
-# Left column takes 35% of the screen, Right column takes 65%
-col_left, col_spacer, col_right = st.columns([3.5, 0.5, 6])
-
-if user_query and user_query != st.session_state.last_query:
-    st.session_state.last_query = user_query
-    st.session_state.df = None
-    
-    with col_left:
-        with st.status("🧠 Analyzing your question...", expanded=True) as status:
-            ontology_context = get_ontology_context(user_query, g)
-            
-            if ontology_context:
-                st.session_state.routing_path = "Ontology Search"
-                st.session_state.final_context = f"{ontology_context}\n\nSchema Fallback:\n{db_schema}"
-                status.update(label="✅ Strategy: Ontology Exact Match", state="complete", expanded=False)
-            else:
-                st.session_state.routing_path = "Vector Search"
-                st.session_state.final_context = vector_search_schema(user_query, db_schema)
-                status.update(label="✅ Strategy: Vector Semantic Search", state="complete", expanded=False)
-                
-            try:
-                st.session_state.original_sql = generate_sql(user_query, st.session_state.final_context)
-            except Exception as e:
-                st.error(str(e))
-                st.stop()
-
-# --- POPULATE COLUMNS ---
-if st.session_state.original_sql:
-    
-    # LEFT COLUMN: Logic, Code Editing, and Learning
-    with col_left:
-        st.markdown("### 📝 Code Editor")
-        
-        edited_sql = st.text_area(
-            "Modify the AI's SQL code:", 
-            value=st.session_state.original_sql, 
-            height=200,
-            label_visibility="collapsed"
-        )
-        
-        if st.button("▶️ Execute Query", type="primary", use_container_width=True):
-            with st.spinner("Fetching data..."):
-                try:
-                    st.session_state.df = pd.read_sql(edited_sql, conn)
-                except Exception as e:
-                    st.error(f"❌ SQL Execution Error: {str(e)}")
-                    st.session_state.df = None
-                    
-        # Teacher Agent Block
-        if edited_sql.strip() != st.session_state.original_sql.strip():
-            st.warning("⚠️ You modified the AI's query.")
-            if st.button("🕸️ Teach AI your edits", use_container_width=True):
-                with st.spinner("Wiring new semantic edges..."):
-                    success, msg = auto_update_ontology(st.session_state.last_query, st.session_state.original_sql, edited_sql)
-                    if success:
-                        st.success(msg)
-                        st.session_state.original_sql = edited_sql
-                        time.sleep(1.5)
-                        st.rerun()
-                    else:
-                        st.error(msg)
-                        
-        with st.expander("🔍 View AI Context Payload"):
-            st.code(st.session_state.final_context, language="markdown")
-
-    # RIGHT COLUMN: Data Results
-    with col_right:
-        st.markdown("### 📊 Query Results")
-        if st.session_state.df is not None:
-            st.dataframe(st.session_state.df, use_container_width=True, height=500)
-        else:
-            st.info("👈 Run the query to see the resulting data here.")
+Make sure your `additional_data.xlsx` file is safely uploaded alongside this in your GitHub repository, sync the changes, and you will be good to go!
