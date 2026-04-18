@@ -282,6 +282,6 @@ if st.session_state.original_sql:
     with col_right:
         st.markdown("### 📊 Query Results")
         if st.session_state.df is not None:
-            st.dataframe(st.session_state.df, use_container_width=True, height=50)
+            st.dataframe(st.session_state.df, use_container_width=False, height=50)
         else:
             st.info("👈 Run the query to see the resulting data here.")
