@@ -280,8 +280,9 @@ if st.session_state.original_sql:
 
     # RIGHT COLUMN: Data Results
     with col_right:
+        dynamic_height = min((len(st.session_state.df) + 1) * 35, 500)
         st.markdown("### 📊 Query Results")
         if st.session_state.df is not None:
-            st.dataframe(st.session_state.df, use_container_width=False, height=50)
+            st.dataframe(st.session_state.df, use_container_width=True, height=dynamic_height)
         else:
             st.info("👈 Run the query to see the resulting data here.")
