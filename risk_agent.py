@@ -72,7 +72,7 @@ def get_ontology_context(user_query, g):
             
     return formatted_context
 
-def vector_search_schema(user_query, schema_text, top_k=100):
+def vector_search_schema(user_query, schema_text, top_k=6):
     model = load_vector_model()
     chunks = ["### TABLE:" + t for t in schema_text.split("### TABLE:")[1:]]
     if not chunks:
