@@ -88,7 +88,7 @@
         }
       ],
       "hasColumn": [
-        "bank:col_data_unit",
+        "bank:col_card_partner",
         "bank:col_card_id_assoc"
       ]
     },
@@ -128,9 +128,9 @@
       "representsConcept": "bank:Concept_AvailableCredit"
     },
     {
-      "@id": "bank:col_data_unit",
+      "@id": "bank:col_card_partner",
       "@type": "bank:Column",
-      "rdfs:label": "data_unit",
+      "rdfs:label": "card_partner",
       "representsConcept": "bank:Concept_RetailPartner"
     },
     {
