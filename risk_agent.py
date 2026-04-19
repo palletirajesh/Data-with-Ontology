@@ -42,6 +42,28 @@ def get_db_connection():
 
 conn = get_db_connection()
 
+# --- INVISIBLE TELEMETRY ENGINE ---
+@st.cache_data(ttl=3600)
+def get_client_location():
+    """Silently captures City and Country based on browser headers."""
+    try:
+        # Streamlit >= 1.37 passes the user's IP in the headers
+        headers = st.context.headers
+        ip = headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        
+        if not ip or ip == "127.0.0.1" or ip == "localhost":
+            return "Local Network"
+            
+        # Free API to convert IP to City/Country
+        response = requests.get(f"http://ip-api.com/json/{ip}", timeout=2)
+        data = response.json()
+        
+        if data.get("status") == "success":
+            return f"{data['city']}, {data['country']}"
+        return "Unknown Location"
+    except Exception:
+        return "Unknown Location"
+
 # ==========================================
 # --- 3. GLOBAL SLIDING WINDOW (MEMORY) ---
 # ==========================================
@@ -54,12 +76,16 @@ def init_global_history():
         st.sidebar.error("⚠️ Global History Table not accessible in Databricks.")
 
 def save_to_global_history(query, sql_code):
+    location = get_client_location()
     with conn.cursor() as cursor:
-        cursor.execute("INSERT INTO gen_ai_bank.query_history (user_query, generated_sql) VALUES (?, ?)", [query, sql_code])
+        cursor.execute(
+            "INSERT INTO gen_ai_bank.query_history (user_query, generated_sql, user_location) VALUES (?, ?, ?)", 
+            [query, sql_code, location]
+        )
 
 def load_global_history(limit=10):
     try:
-        return pd.read_sql(f"SELECT user_query as query, generated_sql as sql FROM gen_ai_bank.query_history ORDER BY created_at DESC LIMIT {limit}", conn).to_dict('records')
+        return pd.read_sql(f"SELECT user_location, user_query as query, generated_sql as sql FROM gen_ai_bank.query_history ORDER BY created_at DESC LIMIT {limit}", conn).to_dict('records')
     except: return []
 
 # ==========================================
@@ -197,12 +223,12 @@ with t2:
 with t3:
     st.markdown("#### 📑 Ontology & Schema")
     st.caption("**The Guardrails**")
-    st.write("The JSON-LD enforces mandatory join logic, while the Markdown provides the technical source of truth.")
-with t4:
-    st.markdown("#### 🏗️ Delta Lake Memory")
-    st.caption("**Contextual Persistence**")
-    st.write("Stores history in Databricks so the team shares a single 'Sliding Window' of context across users.")
+    st.write("The JSON-LD enforces mandatory join logic and follows semantic knowledge of teh data, while the Markdown provides the technical source of truth.")
+
 
 with st.sidebar:
     st.header("🌐 Past User queries")
-    for h in history: st.info(f"🗨️ {h['query']}")
+    for h in history: 
+        # Safely handle older queries that might not have a location tracked yet
+        loc = h.get('user_location') or "Unknown Location"
+        st.info(f"📍 {loc}\n🗨️ {h['query']}")
