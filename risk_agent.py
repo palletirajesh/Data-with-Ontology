@@ -8,7 +8,7 @@ from databricks import sql
 # ==========================================
 # --- 1. CONFIGURATION & SECRETS ---
 # ==========================================
-st.set_page_config(page_title="GenAI Bank Agent", page_icon="🏦", layout="wide")
+st.set_page_config(page_title="Risk Data Agent", page_icon="🏦", layout="wide")
 
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 DB_CONFIG = {
@@ -18,7 +18,7 @@ DB_CONFIG = {
 }
 
 # ==========================================
-# --- 2. CORE CONNECTORS & LOADERS ---
+# --- 2. CONNECTORS & EMBEDDINGS ---
 # ==========================================
 @st.cache_resource
 def get_db_connection():
@@ -27,19 +27,20 @@ def get_db_connection():
 conn = get_db_connection()
 
 def get_databricks_embeddings(text):
-    """Uses Databricks Foundation Model API for embeddings"""
+    """Calls Databricks Foundation API for semantic vectors"""
     url = f"https://{DB_CONFIG['server_hostname']}/serving-endpoints/databricks-gte-large-en/invocations"
     headers = {"Authorization": f"Bearer {DB_CONFIG['access_token']}", "Content-Type": "application/json"}
+    # The API expects a list of inputs
     response = requests.post(url, headers=headers, json={"input": [text]})
     if response.status_code == 200:
         return response.json()['data'][0]['embedding']
     raise Exception(f"Databricks Embedding Error: {response.text}")
 
 # ==========================================
-# --- 3. PERSISTENT GLOBAL SLIDING WINDOW ---
+# --- 3. GLOBAL SLIDING WINDOW (DATABRICKS) ---
 # ==========================================
-def init_history_table():
-    """Creates global memory table if it doesn't exist"""
+def init_global_history():
+    """Initializes the shared history table in Databricks"""
     with conn.cursor() as cursor:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS gen_ai_bank.query_history (
@@ -50,7 +51,7 @@ def init_history_table():
             )
         """)
 
-def save_global_history(query, sql_code):
+def save_to_global_history(query, sql_code):
     with conn.cursor() as cursor:
         cursor.execute("INSERT INTO gen_ai_bank.query_history (user_query, generated_sql) VALUES (?, ?)", [query, sql_code])
 
@@ -60,76 +61,52 @@ def load_global_history(limit=10):
     except: return []
 
 # ==========================================
-# --- 4. UNIFIED CONTEXT ENGINE ---
+# --- 4. UNIFIED CONTEXT (NO REDUNDANCY) ---
 # ==========================================
 @st.cache_data
-def get_unified_context():
-    """Unifies Ontology (JSONLD) and Schema (MD) to avoid redundancy"""
-    unified_lines = []
+def load_unified_semantic_base():
+    """Unifies Schema and Ontology into a single searchable list of facts"""
+    semantic_base = []
     
-    # Process Markdown Schema
+    # 1. Pull Table Structures from MD
     with open("database_schema.md", "r") as f:
-        schema_content = f.read()
-        table_chunks = ["### TABLE:" + t for t in schema_content.split("### TABLE:")[1:]]
-        unified_lines.extend(table_chunks)
+        content = f.read()
+        table_chunks = ["### TABLE:" + t for t in content.split("### TABLE:")[1:]]
+        semantic_base.extend(table_chunks)
     
-    # Process JSONLD Ontology for specific Join Rules
+    # 2. Pull Business Meanings from JSONLD
     g = rdflib.Graph().parse("knowledge_base.jsonld", format="json-ld")
-    # Adding join logic explicitly from ontology as business rules
-    query = """
-    PREFIX bank: <http://gen_ai_bank.com/ontology#>
-    SELECT ?tableLabel ?targetTableLabel ?sKey ?tKey
-    WHERE {
-        ?table a bank:Table ;
-               rdfs:label ?tableLabel ;
-               bank:joinsWith ?join .
-        ?join bank:targetTable ?targetTable ;
-              bank:sourceKey ?sKey ;
-              bank:targetKey ?tKey .
-        ?targetTable rdfs:label ?targetTableLabel .
-    }
-    """
-    for row in g.query(query):
-        unified_lines.append(f"JOIN RULE: {row.tableLabel} joins with {row.targetTableLabel} ON {row.sKey} = {row.tKey}")
-            
-    return unified_lines
-
-def semantic_retrieval(query, unified_lines, top_k=5):
-    """
-    Retrieves the most relevant unified context chunks.
-    Note: For a production scale, replace this list-search with Databricks Vector Search.
-    """
-    # Simple semantic similarity logic would go here using get_databricks_embeddings
-    return "\n\n".join(unified_lines[:top_k])
+    # Fetch Jargon -> Column mappings
+    for s, p, o in g.triples((None, rdflib.URIRef("http://gen_ai_bank.com/ontology#businessJargon"), None)):
+        for _, _, col in g.triples((s, rdflib.URIRef("http://gen_ai_bank.com/ontology#mapsToColumn"), None)):
+             semantic_base.append(f"BUSINESS RULE: '{o}' refers to database column '{col}'")
+             
+    return semantic_base
 
 # ==========================================
-# --- 5. LLM LOGIC & UI ---
+# --- 5. THE AGENT BRAIN ---
 # ==========================================
-def generate_sql(user_query, context, history):
+def generate_sql(user_query, context, global_history):
     messages = [
-        {"role": "system", "content": f"You are a Databricks SQL Expert. Use this context: {context}"}
+        {"role": "system", "content": f"""You are a Databricks SQL Expert for a bank. 
+        Write raw SQL using this Context:
+        {context}
+        
+        Rules:
+        1. ONLY use the Tables and Columns explicitly provided in the Context.
+        2. If JOIN rules are provided, use them exactly.
+        3. For strings, use UPPER case: UPPER(column) = UPPER('value').
+        4. If data is missing, say: 'I cannot answer this with the available data.'
+        5. Output ONLY raw SQL. No markdown. No explanations.
+        """}
     ]
     
-    # Global Sliding Window Context
-    if history:
-        messages.append({"role": "system", "content": "Refer to recent global queries if contextually relevant."})
-        for h in history[-4:]: # Use last 4 for efficiency
-            messages.append({"role": "user", "content": h['query']})
-            messages.append({"role": "assistant", "content": h['sql']})
-
-    messages.append({"role": "user", "content": f"New Query: {user_query}"})
+    # Add Sliding Window (Last 4 queries across all users)
+    for h in global_history[-10:]:
+        messages.append({"role": "user", "content": h['query']})
+        messages.append({"role": "assistant", "content": h['sql']})
     
-    # Rules merged into prompt for optimization
-    prompt_rules = """
-    Rules:
-    1. ONLY use provided Tables and Columns.
-    2. Use JOIN RULES exactly as written.
-    3. Output raw SQL only. No markdown.
-    4. Start FROM Bridge Tables like dim_customer if necessary.
-    5. Translate jargon (e.g., 'Amazon' -> data_unit = 'AMAZON').
-    6. For string datatypes, use UPPER case comparison: UPPER(column) = UPPER('value').
-    """
-    messages[0]["content"] += prompt_rules
+    messages.append({"role": "user", "content": user_query})
 
     response = requests.post(
         "https://api.groq.com/openai/v1/chat/completions",
@@ -138,38 +115,46 @@ def generate_sql(user_query, context, history):
     )
     
     if response.status_code == 200:
-        raw_output = response.json()['choices'][0]['message']['content'].strip()
-        return raw_output.replace("```sql", "").replace("```", "").strip()
-    return f"Error: {response.text}"
+        raw = response.json()['choices'][0]['message']['content'].strip()
+        return raw.replace("```sql", "").replace("```", "").strip()
+    return "Error generating SQL."
 
-# --- Main App ---
+# ==========================================
+# --- 6. USER INTERFACE ---
+# ==========================================
 st.title("🏦 Risk Data Agent")
-init_history_table()
-unified_context = get_unified_context()
+init_global_history()
+semantic_base = load_unified_semantic_base()
 global_history = load_global_history()
 
-user_query = st.text_input("Analyze customer risk:", placeholder="e.g. Amazon customers with high debt")
+query = st.text_input("Ask about bank risk (Shared memory across users):", placeholder="e.g. List Amazon customers with high debt")
 
-if user_query:
-    with st.status("🧠 Processing across instances...") as status:
-        context = semantic_retrieval(user_query, unified_context)
-        sql_query = generate_sql(user_query, context, global_history)
-        status.update(label="✅ Ready", state="complete")
+if query:
+    # Combined Retrieval logic: Finding nearest neighbors in both schema and ontology
+    # For now, we pass the semantic base as context; in a large DB, you'd vectorize this list
+    context_payload = "\n\n".join(semantic_base) 
+    
+    sql_result = generate_sql(query, context_payload, global_history)
+    
+    col_l, col_r = st.columns([4, 6])
+    with col_l:
+        st.markdown("### 📝 SQL Draft")
+        final_sql = st.text_area("Review/Edit:", value=sql_result, height=200)
+        if st.button("▶️ Run & Log Globally", type="primary"):
+            try:
+                st.session_state.df = pd.read_sql(final_sql, conn)
+                save_to_global_history(query, final_sql)
+                st.rerun()
+            except Exception as e:
+                st.error(f"SQL Error: {e}")
 
-    col_left, col_right = st.columns([4, 6])
-    with col_left:
-        st.markdown("### 📝 SQL Code")
-        edited_sql = st.text_area("Review Code:", value=sql_query, height=200)
-        if st.button("▶️ Execute & Log Globally"):
-            st.session_state.df = pd.read_sql(edited_sql, conn)
-            save_global_history(user_query, edited_sql)
-            st.rerun()
-
-    with col_right:
+    with col_r:
+        st.markdown("### 📊 Data")
         if "df" in st.session_state:
             st.dataframe(st.session_state.df, use_container_width=True)
 
 with st.sidebar:
-    st.header("🌐 Global Memory")
+    st.header("🌐 Global Brain")
+    st.caption("Last 10 queries by all users:")
     for h in global_history:
-        st.caption(f"🔹 {h['query']}")
+        st.info(f"Q: {h['query']}")
