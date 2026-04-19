@@ -203,5 +203,5 @@ with t4:
     st.write("Stores history in Databricks so the team shares a single 'Sliding Window' of context across users.")
 
 with st.sidebar:
-    st.header("🌐 Global Context")
+    st.header("🌐 Past User queries")
     for h in history: st.info(f"🗨️ {h['query']}")
