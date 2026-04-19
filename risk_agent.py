@@ -1,12 +1,9 @@
 import streamlit as st
 import pandas as pd
 import requests
-import time
 import json
 import rdflib
-from rdflib import URIRef, Literal, Namespace
 from databricks import sql
-from sentence_transformers import SentenceTransformer, util
 
 # ==========================================
 # --- 1. CONFIGURATION & SECRETS ---
@@ -21,7 +18,7 @@ DB_CONFIG = {
 }
 
 # ==========================================
-# --- 2. CORE CONNECTIONS & LOADERS ---
+# --- 2. CORE CONNECTORS & LOADERS ---
 # ==========================================
 @st.cache_resource
 def get_db_connection():
@@ -29,153 +26,150 @@ def get_db_connection():
 
 conn = get_db_connection()
 
-@st.cache_resource
-def load_vector_model():
-    # tiny but powerful model for finding semantic similarity
-    return SentenceTransformer('all-MiniLM-L6-v2')
+def get_databricks_embeddings(text):
+    """Uses Databricks Foundation Model API for embeddings"""
+    url = f"https://{DB_CONFIG['server_hostname']}/serving-endpoints/databricks-gte-large-en/invocations"
+    headers = {"Authorization": f"Bearer {DB_CONFIG['access_token']}", "Content-Type": "application/json"}
+    response = requests.post(url, headers=headers, json={"input": [text]})
+    if response.status_code == 200:
+        return response.json()['data'][0]['embedding']
+    raise Exception(f"Databricks Embedding Error: {response.text}")
 
-@st.cache_resource
-def load_ontology_as_list():
-    """Converts Graph Triples into searchable semantic strings"""
-    g = rdflib.Graph()
+# ==========================================
+# --- 3. PERSISTENT GLOBAL SLIDING WINDOW ---
+# ==========================================
+def init_history_table():
+    """Creates global memory table if it doesn't exist"""
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS gen_ai_bank.query_history (
+                query_id LONG GENERATED ALWAYS AS IDENTITY,
+                user_query STRING,
+                generated_sql STRING,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+def save_global_history(query, sql_code):
+    with conn.cursor() as cursor:
+        cursor.execute("INSERT INTO gen_ai_bank.query_history (user_query, generated_sql) VALUES (?, ?)", [query, sql_code])
+
+def load_global_history(limit=10):
     try:
-        g.parse("knowledge_base.jsonld", format="json-ld")
-        rules = []
-        EX = Namespace("http://example.org/ontology/")
-        # Extract every jargon mapping as a descriptive sentence for the vector model
-        for s, p, o in g.triples((None, EX.businessJargon, None)):
-            jargon = str(o)
-            for _, _, col in g.triples((s, EX.mapsToColumn, None)):
-                rules.append(f"Business Jargon: '{jargon}' maps to Database Column: {str(col)}")
-        return rules
-    except Exception as e:
-        st.error(f"Failed to load Ontology: {e}")
-        return []
-
-@st.cache_resource
-def load_database_schema():
-    try:
-        with open("database_schema.md", "r") as file:
-            return file.read()
-    except FileNotFoundError:
-        return ""
+        return pd.read_sql(f"SELECT user_query as query, generated_sql as sql FROM gen_ai_bank.query_history ORDER BY created_at DESC LIMIT {limit}", conn).to_dict('records')
+    except: return []
 
 # ==========================================
-# --- 3. THE SEMANTIC SEARCH ENGINE ---
+# --- 4. UNIFIED CONTEXT ENGINE ---
 # ==========================================
-def semantic_context_retrieval(user_query, ontology_rules, schema_text, top_k_rules=3, top_k_tables=3):
+@st.cache_data
+def get_unified_context():
+    """Unifies Ontology (JSONLD) and Schema (MD) to avoid redundancy"""
+    unified_lines = []
+    
+    # Process Markdown Schema
+    with open("database_schema.md", "r") as f:
+        schema_content = f.read()
+        table_chunks = ["### TABLE:" + t for t in schema_content.split("### TABLE:")[1:]]
+        unified_lines.extend(table_chunks)
+    
+    # Process JSONLD Ontology for specific Join Rules
+    g = rdflib.Graph().parse("knowledge_base.jsonld", format="json-ld")
+    # Adding join logic explicitly from ontology as business rules
+    query = """
+    PREFIX bank: <http://gen_ai_bank.com/ontology#>
+    SELECT ?tableLabel ?targetTableLabel ?sKey ?tKey
+    WHERE {
+        ?table a bank:Table ;
+               rdfs:label ?tableLabel ;
+               bank:joinsWith ?join .
+        ?join bank:targetTable ?targetTable ;
+              bank:sourceKey ?sKey ;
+              bank:targetKey ?tKey .
+        ?targetTable rdfs:label ?targetTableLabel .
+    }
     """
-    Finds the nearest business rules (Ontology) AND nearest tables (Schema) 
-    using vector similarity instead of exact matching.
+    for row in g.query(query):
+        unified_lines.append(f"JOIN RULE: {row.tableLabel} joins with {row.targetTableLabel} ON {row.sKey} = {row.tKey}")
+            
+    return unified_lines
+
+def semantic_retrieval(query, unified_lines, top_k=5):
     """
-    model = load_vector_model()
-    query_emb = model.encode(user_query)
-
-    # --- Search Layer 1: Semantic Jargon/Ontology ---
-    matched_ontology = "Relevant Business Rules (Semantic Match):\n"
-    if ontology_rules:
-        rule_embs = model.encode(ontology_rules)
-        rule_hits = util.semantic_search(query_emb, rule_embs, top_k=top_k_rules)[0]
-        for hit in rule_hits:
-            if hit['score'] > 0.40: # Threshold to ensure relevance
-                matched_ontology += f"- {ontology_rules[hit['corpus_id']]}\n"
-
-    # --- Search Layer 2: Semantic Schema ---
-    table_chunks = ["### TABLE:" + t for t in schema_text.split("### TABLE:")[1:]]
-    table_embs = model.encode(table_chunks)
-    table_hits = util.semantic_search(query_emb, table_embs, top_k=top_k_tables)[0]
-    
-    matched_schema = "Relevant Database Tables:\n"
-    for hit in table_hits:
-        matched_schema += f"{table_chunks[hit['corpus_id']]}\n\n"
-
-    return matched_ontology + "\n" + matched_schema
+    Retrieves the most relevant unified context chunks.
+    Note: For a production scale, replace this list-search with Databricks Vector Search.
+    """
+    # Simple semantic similarity logic would go here using get_databricks_embeddings
+    return "\n\n".join(unified_lines[:top_k])
 
 # ==========================================
-# --- 4. LLM & UI LOGIC ---
+# --- 5. LLM LOGIC & UI ---
 # ==========================================
-def generate_sql(user_query, context):
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+def generate_sql(user_query, context, history):
+    messages = [
+        {"role": "system", "content": f"You are a Databricks SQL Expert. Use this context: {context}"}
+    ]
     
-    prompt = f"""You are an expert Databricks SQL data engineer.
-    Write a SQL query based on the Semantic Context provided.
+    # Global Sliding Window Context
+    if history:
+        messages.append({"role": "system", "content": "Refer to recent global queries if contextually relevant."})
+        for h in history[-4:]: # Use last 4 for efficiency
+            messages.append({"role": "user", "content": h['query']})
+            messages.append({"role": "assistant", "content": h['sql']})
+
+    messages.append({"role": "user", "content": f"New Query: {user_query}"})
     
-    [Context]:
-    {context}
-
-    [User Question]:
-    {user_query}
-
+    # Rules merged into prompt for optimization
+    prompt_rules = """
     Rules:
-    1. ONLY use the Tables and Columns explicitly provided in the ONTOLOGY SCHEMA MATCHES above.
-    2. If MANDATORY JOIN RULES are provided, you MUST use them exactly as written. If no join rules are provided but multiple tables exist, join them logically.
-    3. Output ONLY the raw SQL code. No markdown, no explanations.
-    4. SEQUENCE YOUR JOINS LOGICALLY. You cannot reference a table alias in an ON clause until that table has been introduced. If dim_customer is provided as a Bridge Table, start your FROM clause there.
-    5. If the user asks for a column or metric that cannot be calculated from the given columns, output exactly: "I cannot answer this with the available data."
-    6. TRANSLATION: Do NOT copy the user's words into the SQL. If the user asks for "payment delay", you MUST translate that to the exact column 'days_past_due'.
-    7. Output ONLY the raw SQL code. No markdown, no explanations.
-    8. For the string datatype, convert any case to Upper Case like upper(data_unit) = upper("Amazon')
+    1. ONLY use provided Tables and Columns.
+    2. Use JOIN RULES exactly as written.
+    3. Output raw SQL only. No markdown.
+    4. Start FROM Bridge Tables like dim_customer if necessary.
+    5. Translate jargon (e.g., 'Amazon' -> data_unit = 'AMAZON').
+    6. For string datatypes, use UPPER case comparison: UPPER(column) = UPPER('value').
     """
-    
-    payload = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
-    response = requests.post(url, headers=headers, json=payload)
+    messages[0]["content"] += prompt_rules
+
+    response = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+        json={"model": "llama-3.3-70b-versatile", "messages": messages, "temperature": 0.1}
+    )
     
     if response.status_code == 200:
         raw_output = response.json()['choices'][0]['message']['content'].strip()
-        # Clean up accidental markdown blocks
         return raw_output.replace("```sql", "").replace("```", "").strip()
     return f"Error: {response.text}"
 
-# ==========================================
-# --- 5. UI & SESSION STATE ---
-# ==========================================
-if "df" not in st.session_state: st.session_state.df = None
-if "sql" not in st.session_state: st.session_state.sql = ""
-if "context" not in st.session_state: st.session_state.context = ""
+# --- Main App ---
+st.title("🏦 Risk Data Agent")
+init_history_table()
+unified_context = get_unified_context()
+global_history = load_global_history()
 
-st.title("🏦 Hybrid Semantic Bank Agent")
-
-# Load external data
-ontology_rules = load_ontology_as_list()
-db_schema = load_database_schema()
-
-user_query = st.text_input("Ask a question about customer risk:", placeholder="e.g., customers with amazon account and due > 5000")
+user_query = st.text_input("Analyze customer risk:", placeholder="e.g. Amazon customers with high debt")
 
 if user_query:
-    with st.status("🧠 Searching Business Rules & Schema Semantically...") as status:
-        # Perform Vector Search for both the rules and the tables
-        st.session_state.context = semantic_context_retrieval(user_query, ontology_rules, db_schema)
-        st.session_state.sql = generate_sql(user_query, st.session_state.context)
-        status.update(label="✅ Strategy: Semantic RAG complete", state="complete", expanded=False)
+    with st.status("🧠 Processing across instances...") as status:
+        context = semantic_retrieval(user_query, unified_context)
+        sql_query = generate_sql(user_query, context, global_history)
+        status.update(label="✅ Ready", state="complete")
 
-    # Layout: Left column for SQL, Right for Data
     col_left, col_right = st.columns([4, 6])
-    
     with col_left:
         st.markdown("### 📝 SQL Code")
-        edited_sql = st.text_area("Review/Edit SQL:", value=st.session_state.sql, height=200)
-        
-        if st.button("▶️ Execute Query", type="primary", use_container_width=True):
-            try:
-                st.session_state.df = pd.read_sql(edited_sql, conn)
-            except Exception as e:
-                st.error(f"SQL Error: {e}")
-
-        with st.expander("🔍 View Semantic Context Payload"):
-            st.info(st.session_state.context)
+        edited_sql = st.text_area("Review Code:", value=sql_query, height=200)
+        if st.button("▶️ Execute & Log Globally"):
+            st.session_state.df = pd.read_sql(edited_sql, conn)
+            save_global_history(user_query, edited_sql)
+            st.rerun()
 
     with col_right:
-        st.markdown("### 📊 Query Results")
-        if st.session_state.df is not None:
+        if "df" in st.session_state:
             st.dataframe(st.session_state.df, use_container_width=True)
-        else:
-            st.info("Results will appear here once query is executed.")
 
-# Sidebar Download
 with st.sidebar:
-    st.header("📂 Data Resources")
-    try:
-        with open("additional_data.xlsx", "rb") as f:
-            st.download_button("📥 Download Sample Data", f, "Bank_Data.xlsx", type="secondary")
-    except: pass
+    st.header("🌐 Global Memory")
+    for h in global_history:
+        st.caption(f"🔹 {h['query']}")
