@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import requests
-import json
 import rdflib
 from databricks import sql
+from sentence_transformers import SentenceTransformer, util
 
 # ==========================================
 # --- 1. CONFIGURATION & SECRETS ---
@@ -18,29 +18,25 @@ DB_CONFIG = {
 }
 
 # ==========================================
-# --- 2. CONNECTORS & EMBEDDINGS ---
+# --- 2. THE LIBRARIAN (NOMIC EMBEDDINGS) ---
 # ==========================================
+@st.cache_resource
+def load_nomic_model():
+    """Nomic v1.5 handles synonyms like 'Client' vs 'Customer' automatically."""
+    return SentenceTransformer('nomic-ai/nomic-embed-text-v1.5', trust_remote_code=True)
+
+embedder = load_nomic_model()
+
 @st.cache_resource
 def get_db_connection():
     return sql.connect(**DB_CONFIG)
 
 conn = get_db_connection()
 
-def get_databricks_embeddings(text):
-    """Calls Databricks Foundation API for semantic vectors"""
-    url = f"https://{DB_CONFIG['server_hostname']}/serving-endpoints/databricks-gte-large-en/invocations"
-    headers = {"Authorization": f"Bearer {DB_CONFIG['access_token']}", "Content-Type": "application/json"}
-    # The API expects a list of inputs
-    response = requests.post(url, headers=headers, json={"input": [text]})
-    if response.status_code == 200:
-        return response.json()['data'][0]['embedding']
-    raise Exception(f"Databricks Embedding Error: {response.text}")
-
 # ==========================================
-# --- 3. GLOBAL SLIDING WINDOW (DATABRICKS) ---
+# --- 3. GLOBAL SLIDING WINDOW (MEMORY) ---
 # ==========================================
 def init_global_history():
-    """Initializes the shared history table in Databricks"""
     with conn.cursor() as cursor:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS gen_ai_bank.query_history (
@@ -61,51 +57,61 @@ def load_global_history(limit=10):
     except: return []
 
 # ==========================================
-# --- 4. UNIFIED CONTEXT (NO REDUNDANCY) ---
+# --- 4. UNIFIED CONTEXT (ZERO MAINTENANCE) ---
 # ==========================================
 @st.cache_data
-def load_unified_semantic_base():
-    """Unifies Schema and Ontology into a single searchable list of facts"""
-    semantic_base = []
+def get_unified_knowledge():
+    """Unifies Schema and Join Rules. Nomic will handle the synonyms."""
+    knowledge_chunks = []
     
-    # 1. Pull Table Structures from MD
+    # 1. Load technical schema
     with open("database_schema.md", "r") as f:
         content = f.read()
-        table_chunks = ["### TABLE:" + t for t in content.split("### TABLE:")[1:]]
-        semantic_base.extend(table_chunks)
+        knowledge_chunks.extend(["TABLE_STRUCT: " + t for t in content.split("### TABLE:")[1:]])
     
-    # 2. Pull Business Meanings from JSONLD
+    # 2. Load Join Rules from JSONLD (The logic the AI can't guess)
     g = rdflib.Graph().parse("knowledge_base.jsonld", format="json-ld")
-    # Fetch Jargon -> Column mappings
-    for s, p, o in g.triples((None, rdflib.URIRef("http://gen_ai_bank.com/ontology#businessJargon"), None)):
-        for _, _, col in g.triples((s, rdflib.URIRef("http://gen_ai_bank.com/ontology#mapsToColumn"), None)):
-             semantic_base.append(f"BUSINESS RULE: '{o}' refers to database column '{col}'")
-             
-    return semantic_base
+    q_joins = """
+    SELECT ?tLabel ?sK ?tK WHERE { 
+        ?j a <http://gen_ai_bank.com/ontology#JoinDefinition> ; 
+           <http://gen_ai_bank.com/ontology#targetTable> ?t ; 
+           <http://gen_ai_bank.com/ontology#sourceKey> ?sK ; 
+           <http://gen_ai_bank.com/ontology#targetKey> ?tK . 
+        ?t rdfs:label ?tLabel . 
+    }"""
+    for row in g.query(q_joins):
+        knowledge_chunks.append(f"MANDATORY JOIN: Join to {row.tLabel} ON {row.sK} = {row.tK}")
+            
+    return knowledge_chunks
+
+def get_semantic_context(query, knowledge_base, top_k=5):
+    """Finds the most relevant tables/rules using Nomic vectors"""
+    query_emb = embedder.encode(f"search_query: {query}", convert_to_tensor=True)
+    kb_embs = embedder.encode(knowledge_base, convert_to_tensor=True)
+    hits = util.semantic_search(query_emb, kb_embs, top_k=top_k)
+    return "\n\n".join([knowledge_base[hit['corpus_id']] for hit in hits[0]])
 
 # ==========================================
-# --- 5. THE AGENT BRAIN ---
+# --- 5. THE SQL ENGINEER (GROQ LLAMA-3.3) ---
 # ==========================================
-def generate_sql(user_query, context, global_history):
-    messages = [
-        {"role": "system", "content": f"""You are a Databricks SQL Expert for a bank. 
-        Write raw SQL using this Context:
-        {context}
-        
-        Rules:
-        1. ONLY use the Tables and Columns explicitly provided in the Context.
-        2. If JOIN rules are provided, use them exactly.
-        3. For strings, use UPPER case: UPPER(column) = UPPER('value').
-        4. If data is missing, say: 'I cannot answer this with the available data.'
-        5. Output ONLY raw SQL. No markdown. No explanations.
-        """}
-    ]
+def generate_sql(user_query, context, history):
+    system_prompt = f"""You are a Databricks SQL Expert. Use this Context:
+    {context}
     
-    # Add Sliding Window (Last 4 queries across all users)
-    for h in global_history[-10:]:
+    STRICT RULES:
+    1. ONLY use Tables/Columns in the Context.
+    2. Use MANDATORY JOINs exactly. Sequence tables logically.
+    3. Output ONLY raw SQL. No markdown.
+    4. If data is missing, say: 'I cannot answer this with the available data.'
+    5. Start FROM 'dim_customer' for multi-table joins.
+    6. For string filters, use: UPPER(column) = UPPER('value').
+    7. TRANSLATION: Map terms like 'Amazon' to card_partner = 'AMAZON'.
+    """
+    
+    messages = [{"role": "system", "content": system_prompt}]
+    for h in history[-10:]: # Adding global sliding window context
         messages.append({"role": "user", "content": h['query']})
         messages.append({"role": "assistant", "content": h['sql']})
-    
     messages.append({"role": "user", "content": user_query})
 
     response = requests.post(
@@ -114,47 +120,42 @@ def generate_sql(user_query, context, global_history):
         json={"model": "llama-3.3-70b-versatile", "messages": messages, "temperature": 0.1}
     )
     
-    if response.status_code == 200:
-        raw = response.json()['choices'][0]['message']['content'].strip()
-        return raw.replace("```sql", "").replace("```", "").strip()
-    return "Error generating SQL."
+    res_json = response.json()
+    if "choices" in res_json:
+        sql_out = res_json['choices'][0]['message']['content'].strip()
+        return sql_out.replace("```sql", "").replace("```", "").strip()
+    return "I cannot answer this with the available data."
 
 # ==========================================
-# --- 6. USER INTERFACE ---
+# --- 6. MAIN UI ---
 # ==========================================
 st.title("🏦 Risk Data Agent")
 init_global_history()
-semantic_base = load_unified_semantic_base()
-global_history = load_global_history()
+kb = get_unified_knowledge()
+history = load_global_history()
 
-query = st.text_input("Ask about bank risk (Shared memory across users):", placeholder="e.g. List Amazon customers with high debt")
+user_input = st.text_input("Query Bank Data (Shared Memory):", placeholder="e.g. Clients with FICO > 700")
 
-if query:
-    # Combined Retrieval logic: Finding nearest neighbors in both schema and ontology
-    # For now, we pass the semantic base as context; in a large DB, you'd vectorize this list
-    context_payload = "\n\n".join(semantic_base) 
-    
-    sql_result = generate_sql(query, context_payload, global_history)
+if user_input:
+    context = get_semantic_context(user_input, kb)
+    generated_sql = generate_sql(user_input, context, history)
     
     col_l, col_r = st.columns([4, 6])
     with col_l:
         st.markdown("### 📝 SQL Draft")
-        final_sql = st.text_area("Review/Edit:", value=sql_result, height=200)
+        final_sql = st.text_area("SQL:", value=generated_sql, height=250)
         if st.button("▶️ Run & Log Globally", type="primary"):
             try:
                 st.session_state.df = pd.read_sql(final_sql, conn)
-                save_to_global_history(query, final_sql)
+                save_to_global_history(user_input, final_sql)
                 st.rerun()
-            except Exception as e:
-                st.error(f"SQL Error: {e}")
+            except Exception as e: st.error(f"SQL Error: {e}")
 
     with col_r:
-        st.markdown("### 📊 Data")
+        st.markdown("### 📊 Results")
         if "df" in st.session_state:
             st.dataframe(st.session_state.df, use_container_width=True)
 
 with st.sidebar:
-    st.header("🌐 Global Brain")
-    st.caption("Last 10 queries by all users:")
-    for h in global_history:
-        st.info(f"Q: {h['query']}")
+    st.header("🌐 Global History")
+    for h in history: st.caption(f"🗨️ {h['query']}")
