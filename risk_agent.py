@@ -139,29 +139,19 @@ with col_head:
     user_input = st.text_input("Query Bank Data (Shared Memory):", placeholder="e.g. Clients with FICO > 700 at Amazon")
 
 with col_dl:
-    import io 
-    excel_buffer = io.BytesIO()
-    
-    # This creates one Excel file with a sheet for every entry in SOURCE_FILES
-    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-        for csv_filename, sheet_name in SOURCE_FILES.items():
-            try:
-                # Reads each of your uploaded CSVs
-                df_temp = pd.read_csv(csv_filename) 
-                # Saves it as a sheet in the Excel buffer
-                df_temp.to_excel(writer, sheet_name=sheet_name, index=False)
-            except Exception as e:
-                st.sidebar.error(f"Missing file: {csv_filename}")
-    
-    st.download_button(
-        label="Download DB",
-        data=excel_buffer.getvalue(),
-        file_name="bank_risk_database.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        icon="💾",
-        help="Download the multi-sheet Excel database"
-    )
-
+    # Direct download of the single Excel file
+    try:
+        with open("additional_data.xlsx", "rb") as f:
+            st.download_button(
+                label="Download DB",
+                data=f,
+                file_name="bank_risk_database.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                icon="💾",
+                help="Download the underlying Excel database."
+            )
+    except FileNotFoundError:
+        st.error("Excel file not found.")
 # ==========================================
 # --- 7. MAIN EXECUTION ---
 # ==========================================
