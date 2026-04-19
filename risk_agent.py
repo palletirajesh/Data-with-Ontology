@@ -18,6 +18,14 @@ DB_CONFIG = {
     "access_token": st.secrets["DB_ACCESS_TOKEN"]
 }
 
+# --- 1. CONFIGURATION & SECRETS ---
+SOURCE_FILES = {
+    "additional_data.xlsx - dim_customer.csv": "dim_customer",
+    "additional_data.xlsx - fact_card_ledger.csv": "fact_card_ledger",
+    "additional_data.xlsx - dim_card_association.csv": "dim_card_association",
+    "additional_data.xlsx - fact_credit_bureau.csv": "fact_credit_bureau"
+}
+
 # ==========================================
 # --- 2. CORE ENGINES (NOMIC & DB) ---
 # ==========================================
@@ -131,23 +139,27 @@ with col_head:
     user_input = st.text_input("Query Bank Data (Shared Memory):", placeholder="e.g. Clients with FICO > 700 at Amazon")
 
 with col_dl:
-    # Reconstruct the single Excel file with multiple sheets
+    import io 
     excel_buffer = io.BytesIO()
+    
+    # This creates one Excel file with a sheet for every entry in SOURCE_FILES
     with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
         for csv_filename, sheet_name in SOURCE_FILES.items():
             try:
-                df_temp = pd.read_csv(csv_filename)
+                # Reads each of your uploaded CSVs
+                df_temp = pd.read_csv(csv_filename) 
+                # Saves it as a sheet in the Excel buffer
                 df_temp.to_excel(writer, sheet_name=sheet_name, index=False)
-            except Exception:
-                pass
+            except Exception as e:
+                st.sidebar.error(f"Missing file: {csv_filename}")
     
     st.download_button(
         label="Download DB",
         data=excel_buffer.getvalue(),
-        file_name="additional_data.xlsx",
+        file_name="bank_risk_database.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         icon="💾",
-        help="Download the full underlying database (all tables) as a multi-sheet Excel file."
+        help="Download the multi-sheet Excel database"
     )
 
 # ==========================================
