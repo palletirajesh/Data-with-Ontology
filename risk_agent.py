@@ -37,15 +37,15 @@ conn = get_db_connection()
 # --- 3. GLOBAL SLIDING WINDOW (MEMORY) ---
 # ==========================================
 def init_global_history():
-    with conn.cursor() as cursor:
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS gen_ai_bank.query_history (
-                query_id LONG GENERATED ALWAYS AS IDENTITY,
-                user_query STRING,
-                generated_sql STRING,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+    """Verifies that the existing history table is accessible."""
+    try:
+        with conn.cursor() as cursor:
+            # We just do a simple check to ensure the table is there
+            cursor.execute("SELECT 1 FROM gen_ai_bank.query_history LIMIT 1")
+    except Exception as e:
+        st.error("⚠️ Global History Table not found in Databricks.")
+        st.info("Please ensure 'gen_ai_bank.query_history' exists in your workspace.")
+        # We don't raise the error so the app can still run without history
 
 def save_to_global_history(query, sql_code):
     with conn.cursor() as cursor:
