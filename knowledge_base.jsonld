@@ -155,36 +155,7 @@
       "@id": "bank:Concept_PaymentDelay",
       "@type": "owl:Class",
       "businessJargon": ["payment delay", "late payments", "overdue"]
-    },
-    {
-      "@id": "bank:Concept_Debt",
-      "@type": "owl:Class",
-      "businessJargon": ["ENR", "balance", "used amount", "debt", "usage"]
-    },
-    {
-      "@id": "bank:Concept_AvailableCredit",
-      "@type": "owl:Class",
-      "businessJargon": ["OSUC", "unutilized", "limit", "available credit"]
-    },
-    {
-      "@id": "bank:Concept_RetailPartner",
-      "@type": "owl:Class",
-      "businessJargon": ["Amazon", "Target", "partner", "retail", "data_unit", "clients who shop at Target"]
-    },
-    {
-      "@id": "bank:Concept_CustomerIdentity",
-      "@type": "owl:Class",
-      "businessJargon": ["customer name", "client list", "identity", "ssn", "SIN", "clients"]
-    },
-    {
-      "@id": "bank:Concept_CreditScore",
-      "@type": "owl:Class",
-      "businessJargon": ["FICO", "credit score", "bureau refresh"]
-    },
-    {
-      "@id": "bank:Concept_CardIdentifier",
-      "@type": "owl:Class",
-      "businessJargon": ["card number", "account number", "card id"]
     }
+    
   ]
 }
