@@ -1,9 +1,14 @@
+# --- Frontend & Data Handling ---
 streamlit
 pandas
-requests
-rdflib
-databricks-sql-connector>=3.3.0
-pyarrow>=15.0.0
 xlsxwriter
+
+# --- AI & Semantic Retrieval (Nomic v1.5) ---
 sentence-transformers
 einops
+requests
+rdflib
+
+# --- Databricks Connectivity ---
+databricks-sql-connector>=3.3.0
+pyarrow>=15.0.0
