@@ -52,9 +52,9 @@ You MUST use fully qualified Databricks table names (catalog.schema.table). Alwa
 ### TABLE: gen_ai_bank.dim_card_association (Alias: a)
 **Columns:**
 - `card_id` (string): Unique card ID
-- `data_unit` (string): Partner names (e.g., Amazon, Target)
+- `card_partner` (string): Partner names (e.g., Amazon, Target)
 - `geography_group` (string): Bank region
 
 **Business Jargon & Semantic Rules:**
-- **Retail Partner** = `data_unit`
+- **Retail Partner** = `card_partner`
 - Also covers concepts: Amazon card, Target card, partner, retail.
