@@ -98,6 +98,7 @@ def get_semantic_context(query, knowledge_base, top_k=10):
 # --- 5. THE SQL ENGINEER (GROQ LLAMA-3.3) ---
 # ==========================================
 def generate_sql(user_query, context, history):
+    
     system_prompt = f"""You are a Databricks SQL Expert. Context:
     {context}
     
@@ -112,7 +113,7 @@ def generate_sql(user_query, context, history):
     """
     
     messages = [{"role": "system", "content": system_prompt}]
-    for h in history[-10:]:
+    for h in history[-3:]:
         messages.append({"role": "user", "content": h['query']})
         messages.append({"role": "assistant", "content": h['sql']})
     messages.append({"role": "user", "content": user_query})
