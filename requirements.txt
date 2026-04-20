@@ -6,3 +6,4 @@ rdflib
 databricks-sql-connector>=3.3.0
 pyarrow>=15.0.0
 sentence-transformers
+torchvision
