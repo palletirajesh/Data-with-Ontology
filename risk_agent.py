@@ -29,14 +29,14 @@ SOURCE_FILES = {
 # ==========================================
 # --- 2. CORE ENGINES (NOMIC & DB) ---
 # ==========================================
-@st.cache_resource
+
 def load_nomic_model():
     """High-res embeddings that understand 'Client' == 'Customer' natively."""
     return SentenceTransformer('nomic-ai/nomic-embed-text-v1.5', trust_remote_code=True)
 
 embedder = load_nomic_model()
 
-@st.cache_resource
+# Removed @st.cache_resource so it doesn't hold onto dead sessions!
 def get_db_connection():
     return sql.connect(**DB_CONFIG)
 
@@ -133,7 +133,7 @@ def generate_sql(user_query, context, history):
     2. Use MANDATORY JOINs exactly. Sequence tables logically.
     3. Output ONLY raw SQL code. No markdown or explanations.
     4. If data is missing, output EXACTLY: "I cannot answer this with the available data."
-    5. Start FROM 'gen_ai_bank.dim_customer' for multi-table joins.
+    5. Use 'gen_ai_bank.dim_customer' for multi-table joins.
     6. For string filters, use: UPPER(column) = UPPER('value').
     7. TRANSLATION: Map terms like 'Amazon' to card_partner = 'AMAZON'.
     """
