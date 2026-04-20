@@ -1,11 +1,11 @@
 import os
 # CRITICAL FIX FOR STREAMLIT CLOUD SEGFAULT
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import streamlit as st
 import pandas as pd
 import requests
 import rdflib
-import io
 from databricks import sql
 from sentence_transformers import SentenceTransformer, util
 
@@ -21,29 +21,15 @@ DB_CONFIG = {
     "access_token": st.secrets["DB_ACCESS_TOKEN"]
 }
 
-# --- 1. CONFIGURATION & SECRETS ---
-SOURCE_FILES = {
-    "additional_data.xlsx - dim_customer.csv": "dim_customer",
-    "additional_data.xlsx - fact_card_ledger.csv": "fact_card_ledger",
-    "additional_data.xlsx - dim_card_association.csv": "dim_card_association",
-    "additional_data.xlsx - fact_credit_bureau.csv": "fact_credit_bureau"
-}
 # ==========================================
-# --- 2. CORE ENGINES (NOMIC & DB) ---
+# --- 2. CORE ENGINES (EMBEDDINGS & DB) ---
 # ==========================================
-
 @st.cache_resource
-def load_nomic_model():
-    """High-res embeddings that understand 'Client' == 'Customer' natively."""
-    # The 'safe_serialization=True' and adding specific model_kwargs prevents 
-    # the RoPE (Rotary Positional Embedding) dimension mismatch bug in PyTorch.
-    return SentenceTransformer(
-        'nomic-ai/nomic-embed-text-v1.5', 
-        trust_remote_code=True,
-        model_kwargs={"rotary_scaling_factor": 2} # This forces the RoPE math to stabilize
-    )
+def load_embedding_model():
+    """Lightweight 80MB embeddings (MiniLM) that fit in Streamlit's 1GB limit."""
+    return SentenceTransformer('all-MiniLM-L6-v2')
 
-embedder = load_nomic_model()
+embedder = load_embedding_model()
 
 # We deliberately DO NOT use caching here so Databricks sessions don't go stale
 def get_db_connection():
@@ -51,21 +37,17 @@ def get_db_connection():
 
 conn = get_db_connection()
 
-
-
 # --- INVISIBLE TELEMETRY ENGINE ---
 @st.cache_data(ttl=3600)
 def get_client_location():
     """Silently captures City and Country based on browser headers."""
     try:
-        # Streamlit >= 1.37 passes the user's IP in the headers
         headers = st.context.headers
         ip = headers.get("X-Forwarded-For", "").split(",")[0].strip()
         
         if not ip or ip == "127.0.0.1" or ip == "localhost":
             return "Local Network"
             
-        # Free API to convert IP to City/Country
         response = requests.get(f"http://ip-api.com/json/{ip}", timeout=2)
         data = response.json()
         
@@ -79,7 +61,6 @@ def get_client_location():
 # --- 3. GLOBAL SLIDING WINDOW (MEMORY) ---
 # ==========================================
 def init_global_history():
-    """Verifies that the existing history table is accessible."""
     try:
         with conn.cursor() as cursor:
             cursor.execute("SELECT 1 FROM gen_ai_bank.query_history LIMIT 1")
@@ -147,7 +128,6 @@ def get_unified_knowledge():
             jargon_mapping[col_name] = []
         jargon_mapping[col_name].append(jargon_term)
         
-    # Create semantic chunks for each column's jargon
     for col, jargons in jargon_mapping.items():
         jargon_list_str = ", ".join(f"'{j}'" for j in jargons)
         knowledge_chunks.append(
@@ -161,12 +141,11 @@ def get_semantic_context(query, knowledge_base, top_k=10):
     kb_embs = embedder.encode(knowledge_base, convert_to_tensor=True)
     hits = util.semantic_search(query_emb, kb_embs, top_k=top_k)
     return "\n\n".join([knowledge_base[hit['corpus_id']] for hit in hits[0]])
-    
+
 # ==========================================
 # --- 5. THE SQL ENGINEER (GROQ LLAMA-3.3) ---
 # ==========================================
 def generate_sql(user_query, context, history):
-    
     system_prompt = f"""You are a Databricks SQL Expert. Context:
     {context}
     
@@ -175,9 +154,9 @@ def generate_sql(user_query, context, history):
     2. Use MANDATORY JOINs exactly. Sequence tables logically.
     3. Output ONLY raw SQL code. No markdown or explanations.
     4. If data is missing, output EXACTLY: "I cannot answer this with the available data."
-    5. Use 'gen_ai_bank.dim_customer' for multi-table joins.
+    5. Always begin with a SELECT clause. For multi-table joins, the main FROM table MUST be 'gen_ai_bank.dim_customer'.
     6. For string filters, use: UPPER(column) = UPPER('value').
-    7. TRANSLATION: Map terms like 'Amazon' to card_partner = 'AMAZON'.
+    7. TRANSLATION: Apply BUSINESS TRANSLATION RULES strictly to map user jargon to correct columns.
     """
     
     messages = [{"role": "system", "content": system_prompt}]
@@ -205,10 +184,9 @@ st.title("🏦 Risk Data Agent")
 
 col_head, col_dl = st.columns([0.8, 0.2])
 with col_head:
-    user_input = st.text_input("Query Bank Data (Shared Memory):", placeholder="e.g. Clients with FICO > 700 at Amazon")
+    user_input = st.text_input("Query Bank Data (Shared Memory):", placeholder="e.g. Which clients have an OSUC > 5000?")
 
 with col_dl:
-    # Direct download of the single Excel file
     try:
         with open("additional_data.xlsx", "rb") as f:
             st.download_button(
@@ -220,7 +198,8 @@ with col_dl:
                 help="Download the underlying Excel database."
             )
     except FileNotFoundError:
-        st.error("Excel file not found.")
+        pass
+
 # ==========================================
 # --- 7. MAIN EXECUTION ---
 # ==========================================
@@ -259,18 +238,20 @@ with t1:
     st.caption("**SQL Engineering**")
     st.write("Ensures complex JOIN accuracy and strict logic sequencing at sub-second speeds.")
 with t2:
-    st.markdown("#### 🔍 Nomic-Embed-v1.5")
-    st.caption("**Semantic Retrieval**")
-    st.write("Eliminates manual jargon mapping by mathematically clustering synonyms like 'Client' and 'Customer'.")
+    st.markdown("#### 🔍 MiniLM Semantic Retrieval")
+    st.caption("**Edge-Optimized Embeddings**")
+    st.write("Provides highly accurate, lightweight vector mapping to connect user questions to data rules.")
 with t3:
     st.markdown("#### 📑 Ontology & Schema")
     st.caption("**The Guardrails**")
-    st.write("The JSON-LD enforces mandatory join logic and follows semantic knowledge of teh data, while the Markdown provides the technical source of truth.")
-
+    st.write("The JSON-LD enforces mandatory join logic and business jargon, while the Markdown provides the technical source of truth.")
+with t4:
+    st.markdown("#### 🏗️ Delta Lake Memory")
+    st.caption("**Contextual Persistence**")
+    st.write("Stores history in Databricks so the team shares a single 'Sliding Window' of context across users.")
 
 with st.sidebar:
     st.header("🌐 Past User queries")
     for h in history: 
-        # Safely handle older queries that might not have a location tracked yet
         loc = h.get('user_location') or "Unknown Location"
         st.info(f"📍 {loc}\n🗨️ {h['query']}")
