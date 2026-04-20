@@ -32,7 +32,13 @@ SOURCE_FILES = {
 @st.cache_resource
 def load_nomic_model():
     """High-res embeddings that understand 'Client' == 'Customer' natively."""
-    return SentenceTransformer('nomic-ai/nomic-embed-text-v1.5', trust_remote_code=True)
+    # The 'safe_serialization=True' and adding specific model_kwargs prevents 
+    # the RoPE (Rotary Positional Embedding) dimension mismatch bug in PyTorch.
+    return SentenceTransformer(
+        'nomic-ai/nomic-embed-text-v1.5', 
+        trust_remote_code=True,
+        model_kwargs={"rotary_scaling_factor": 2} # This forces the RoPE math to stabilize
+    )
 
 embedder = load_nomic_model()
 
