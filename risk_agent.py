@@ -105,13 +105,19 @@ def load_global_history(limit=10):
 @st.cache_data
 def get_unified_knowledge():
     knowledge_chunks = []
+    
     # 1. Load technical schema from MD
-    with open("database_schema.md", "r") as f:
-        content = f.read()
-        knowledge_chunks.extend(["TABLE_STRUCT: " + t for t in content.split("### TABLE:")[1:]])
+    try:
+        with open("database_schema.md", "r") as f:
+            content = f.read()
+            knowledge_chunks.extend(["TABLE_STRUCT: " + t for t in content.split("### TABLE:")[1:]])
+    except FileNotFoundError:
+        pass
+    
+    # Parse the JSON-LD Knowledge Base
+    g = rdflib.Graph().parse("knowledge_base.jsonld", format="json-ld")
     
     # 2. Load mandatory Join Rules from JSONLD
-    g = rdflib.Graph().parse("knowledge_base.jsonld", format="json-ld")
     q_joins = """
     SELECT ?tLabel ?sK ?tK WHERE { 
         ?j a <http://gen_ai_bank.com/ontology#JoinDefinition> ; 
@@ -122,6 +128,31 @@ def get_unified_knowledge():
     }"""
     for row in g.query(q_joins):
         knowledge_chunks.append(f"MANDATORY JOIN: Join to {row.tLabel} ON {row.sK} = {row.tK}")
+        
+    # 3. Load Business Jargon & Concepts from JSONLD
+    q_jargon = """
+    SELECT ?colLabel ?jargon WHERE { 
+        ?col a <http://gen_ai_bank.com/ontology#Column> ; 
+             <http://www.w3.org/2000/01/rdf-schema#label> ?colLabel ; 
+             <http://gen_ai_bank.com/ontology#representsConcept> ?concept . 
+        ?concept <http://gen_ai_bank.com/ontology#businessJargon> ?jargon . 
+    }"""
+    
+    jargon_mapping = {}
+    for row in g.query(q_jargon):
+        col_name = str(row.colLabel)
+        jargon_term = str(row.jargon)
+        
+        if col_name not in jargon_mapping:
+            jargon_mapping[col_name] = []
+        jargon_mapping[col_name].append(jargon_term)
+        
+    # Create semantic chunks for each column's jargon
+    for col, jargons in jargon_mapping.items():
+        jargon_list_str = ", ".join(f"'{j}'" for j in jargons)
+        knowledge_chunks.append(
+            f"BUSINESS TRANSLATION RULE: If the user asks about {jargon_list_str}, they are referring to the database column '{col}'."
+        )
             
     return knowledge_chunks
 
@@ -130,7 +161,7 @@ def get_semantic_context(query, knowledge_base, top_k=10):
     kb_embs = embedder.encode(knowledge_base, convert_to_tensor=True)
     hits = util.semantic_search(query_emb, kb_embs, top_k=top_k)
     return "\n\n".join([knowledge_base[hit['corpus_id']] for hit in hits[0]])
-
+    
 # ==========================================
 # --- 5. THE SQL ENGINEER (GROQ LLAMA-3.3) ---
 # ==========================================
