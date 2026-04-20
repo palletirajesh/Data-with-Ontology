@@ -25,22 +25,24 @@ SOURCE_FILES = {
     "additional_data.xlsx - dim_card_association.csv": "dim_card_association",
     "additional_data.xlsx - fact_credit_bureau.csv": "fact_credit_bureau"
 }
-
 # ==========================================
 # --- 2. CORE ENGINES (NOMIC & DB) ---
 # ==========================================
 
+@st.cache_resource
 def load_nomic_model():
     """High-res embeddings that understand 'Client' == 'Customer' natively."""
     return SentenceTransformer('nomic-ai/nomic-embed-text-v1.5', trust_remote_code=True)
 
 embedder = load_nomic_model()
-@st.cache_resource
-# Removed @st.cache_resource so it doesn't hold onto dead sessions!
+
+# We deliberately DO NOT use caching here so Databricks sessions don't go stale
 def get_db_connection():
     return sql.connect(**DB_CONFIG)
 
 conn = get_db_connection()
+
+
 
 # --- INVISIBLE TELEMETRY ENGINE ---
 @st.cache_data(ttl=3600)
