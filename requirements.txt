@@ -8,6 +8,7 @@ sentence-transformers
 einops
 requests
 rdflib
+transformers==4.38.2
 
 # --- Databricks Connectivity ---
 databricks-sql-connector>=3.3.0
