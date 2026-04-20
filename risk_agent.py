@@ -1,3 +1,6 @@
+import os
+# CRITICAL FIX FOR STREAMLIT CLOUD SEGFAULT
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import streamlit as st
 import pandas as pd
 import requests
