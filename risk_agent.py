@@ -35,7 +35,7 @@ def load_nomic_model():
     return SentenceTransformer('nomic-ai/nomic-embed-text-v1.5', trust_remote_code=True)
 
 embedder = load_nomic_model()
-
+@st.cache_resource
 # Removed @st.cache_resource so it doesn't hold onto dead sessions!
 def get_db_connection():
     return sql.connect(**DB_CONFIG)
