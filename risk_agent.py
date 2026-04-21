@@ -157,6 +157,7 @@ def generate_sql(user_query, context, history):
     5. Always begin with a SELECT clause. For multi-table joins, the main FROM table MUST be 'gen_ai_bank.dim_customer'.
     6. For string filters, use: UPPER(column) = UPPER('value').
     7. TRANSLATION: Apply BUSINESS TRANSLATION RULES strictly to map user jargon to correct columns.
+    8. GRANULARITY: Unless the user explicitly uses words like 'count', 'total', or 'how many', ALWAYS return a detailed list of records (SELECT *) rather than a summary or count.
     """
     
     messages = [{"role": "system", "content": system_prompt}]
