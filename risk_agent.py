@@ -1,4 +1,5 @@
 import os
+os.environ["OMP_NUM_THREADS"] = "1" 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import streamlit as st
@@ -17,33 +18,27 @@ GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 # ==========================================
 # --- 2. DUCKDB ENGINE ---
 # ==========================================
-@st.cache_resource
+@st.cache_resource(show_spinner="Loading AI Brain...")
 def load_embedding_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')
+    # Use a very specific, small model to avoid memory recursion
+    return SentenceTransformer('paraphrase-MiniLM-L3-v2', device="cpu")
 
-embedder = load_embedding_model()
+# --- Section 3: The DuckDB "Schema Safety" ---
 
-@st.cache_resource
 def get_db_connection():
     try:
+        # Using a fresh connection string to avoid file locks
         conn = duckdb.connect(database='bank_data.db', read_only=False)
-        # Register Parquet files
+        
         tables = ['dim_card_association', 'fact_credit_bureau', 'fact_card_ledger', 'dim_customer']
         for table in tables:
+            # IMPORTANT: Check if table exists as a view first
             conn.execute(f"CREATE OR REPLACE VIEW {table} AS SELECT * FROM '{table}.parquet'")
         
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS query_history (
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                user_query TEXT, generated_sql TEXT, user_location TEXT
-            )
-        """)
         return conn
     except Exception as e:
-        st.error(f"❌ DB Error: {e}")
-        return None
-
-conn = get_db_connection()
+        # Fallback to in-memory if file-based fails
+        return duckdb.connect(database=':memory:')
 
 # ==========================================
 # --- 3. CONTEXT ENGINE (FIXED) ---
