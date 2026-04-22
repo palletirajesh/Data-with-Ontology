@@ -1,9 +1,6 @@
 # Bank Database Schema & Business Glossary
-You MUST use fully qualified Databricks table names (catalog.schema.table). Always use the standard table aliases provided below when writing JOINs.
 
----
-
-### TABLE: fact_card_ledger (Alias: l)
+### TABLE: fact_card_ledger
 **Columns:**
 - `card_id` (string): Card id for the customer
 - `used_amount` (decimal): The amount consumed on the credit card
@@ -23,7 +20,7 @@ You MUST use fully qualified Databricks table names (catalog.schema.table). Alwa
 
 ---
 
-### TABLE: dim_customer (Alias: c)
+### TABLE: dim_customer
 **Columns:**
 - `cust_id` (string): Unique bank identifier
 - `customer_name` (string): Full name of the customer
@@ -38,7 +35,7 @@ You MUST use fully qualified Databricks table names (catalog.schema.table). Alwa
 
 ---
 
-### TABLE: fact_credit_bureau (Alias: f)
+### TABLE: fact_credit_bureau
 **Columns:**
 - `ssn_hash` (string): SIN number of the credit card customer
 - `fico_score` (int): Credit score or FICO score
@@ -49,7 +46,7 @@ You MUST use fully qualified Databricks table names (catalog.schema.table). Alwa
 
 ---
 
-### TABLE: dim_card_association (Alias: a)
+### TABLE: dim_card_association
 **Columns:**
 - `card_id` (string): Unique card ID
 - `card_partner` (string): Partner names (e.g., Amazon, Target)
