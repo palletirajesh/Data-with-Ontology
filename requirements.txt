@@ -1,9 +1,7 @@
 streamlit
 pandas
-requests
-xlsxwriter
-rdflib
-pyarrow>=15.0.0
-sentence-transformers
-torchvision
 duckdb
+pyarrow
+rdflib
+requests
+sentence-transformers
