@@ -106,16 +106,18 @@ def generate_sql(user_query, context, history):
         
     STRICT RULES:
     1. ONLY use Tables/Columns in Context.
-    2. Use MANDATORY JOINs exactly. Sequence tables logically.
-    3. Output ONLY raw SQL code. No markdown or explanations.
-    4. If data is missing, output EXACTLY: "I cannot answer this with the available data."
-    5. Always begin with a SELECT clause. For multi-table joins, dim_customer should act a bridge table
-    6. EVERY table name in the SQL must be prefixed with: `{full_path}.
-    7. Example format: SELECT * FROM `{full_path}.dim_customer` JOIN `{full_path}.dim_card_association`
-    8. Tables available: dim_customer, dim_card_association, fact_card_ledger, fact_credit_bureau.
-    9. For string filters, use: UPPER(column) = UPPER('value').
-    10. TRANSLATION: Apply BUSINESS TRANSLATION RULES strictly to map user jargon to correct columns.
-    11. GRANULARITY: Unless the user explicitly uses words like 'count', 'total', or 'how many', ALWAYS return a detailed list of records (SELECT *) rather than a summary or count.
+    2. Table Format: ALWAYS use backticks and the full path: `{full_path}.table_name`
+    3. NO PARENTHESES: Never put () after a table name.
+    4. Use MANDATORY JOINs exactly. Sequence tables logically.
+    5. Output ONLY raw SQL code. No markdown or explanations.
+    6. If data is missing, output EXACTLY: "I cannot answer this with the available data."
+    7. Always begin with a SELECT clause. For multi-table joins, dim_customer should act a bridge table
+    8. EVERY table name in the SQL must be prefixed with: `{full_path}.
+    9. Example format: SELECT * FROM `{full_path}.dim_customer` JOIN `{full_path}.dim_card_association`
+    10. Tables available: dim_customer, dim_card_association, fact_card_ledger, fact_credit_bureau.
+    11. For string filters, use: UPPER(column) = UPPER('value').
+    12. TRANSLATION: Apply BUSINESS TRANSLATION RULES strictly to map user jargon to correct columns.
+    13. GRANULARITY: Unless the user explicitly uses words like 'count', 'total', or 'how many', ALWAYS return a detailed list of records (SELECT *) rather than a summary or count.
     """
     
     messages = [{"role": "system", "content": system_prompt}]
