@@ -6,3 +6,4 @@ rdflib
 requests
 sentence-transformers
 pyarrow
+db-dtypes
