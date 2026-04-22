@@ -1,6 +1,7 @@
-streamlit==1.32.0
+streamlit
 pandas
-duckdb
+google-cloud-bigquery
 pyarrow
 rdflib
 requests
+sentence-transformers
