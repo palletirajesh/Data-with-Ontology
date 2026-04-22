@@ -155,7 +155,16 @@
       "@id": "bank:Concept_PaymentDelay",
       "@type": "owl:Class",
       "businessJargon": ["payment delay", "late payments", "overdue"]
-    }
+    },
+	{
+  	"@id": "bank:col_card_partner",
+  	"@type": "bank:Column",
+  	"rdfs:label": "card_partner",
+  	"representsConcept": {
+    "@type": "bank:Concept",
+    "businessJargon": ["Amazon", "Amazon Card", "Co-brand", "Best-Buy","BestBuy","Best Buy", "Target","Costo"]
+  }
+}
     
   ]
 }
