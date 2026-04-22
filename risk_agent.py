@@ -33,9 +33,27 @@ embedder = load_embedding_model()
 
 # We deliberately DO NOT use caching here so Databricks sessions don't go stale
 def get_db_connection():
-    return sql.connect(**DB_CONFIG)
+    """Optimized for Paid Serverless: Handles the wake-up delay."""
+    try:
+        return sql.connect(
+            server_hostname=DB_CONFIG["server_hostname"],
+            http_path=DB_CONFIG["http_path"],
+            access_token=DB_CONFIG["access_token"],
+            # PAID TIER STABILITY FLAGS
+            _retry_delay_min=5,             # Wait 5s between retries
+            _retry_stop_after_attempts_count=10, # Try for ~1 minute
+            _timeout=60                     # Wait up to 60s for session open
+        )
+    except Exception as e:
+        st.error(f"📡 Databricks Warehouse is waking up... Please wait 30s and refresh. Error: {e}")
+        return None
 
 conn = get_db_connection()
+
+# Stop execution if DB is not reachable
+if conn is None:
+    st.warning("⚠️ Database connection not established. Check your Databricks Warehouse status.")
+    st.stop()
 
 # --- INVISIBLE TELEMETRY ENGINE ---
 @st.cache_data(ttl=3600)
@@ -69,11 +87,14 @@ def init_global_history():
 
 def save_to_global_history(query, sql_code):
     location = get_client_location()
-    with conn.cursor() as cursor:
-        cursor.execute(
-            "INSERT INTO gen_ai_bank.query_history (user_query, generated_sql, user_location) VALUES (?, ?, ?)", 
-            [query, sql_code, location]
-        )
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO gen_ai_bank.query_history (user_query, generated_sql, user_location) VALUES (?, ?, ?)", 
+                [query, sql_code, location]
+            )
+    except:
+        pass
 
 def load_global_history(limit=10):
     try:
@@ -216,7 +237,7 @@ if user_input:
     with col_l:
         st.markdown("### 📝 SQL Draft")
         final_sql = st.text_area("SQL:", value=generated_sql, height=250)
-        if st.button("▶️ Run Query (user can modify as well)", type="primary", use_container_width=True):
+        if st.button("▶️ Run Query", type="primary", use_container_width=True):
             try:
                 st.session_state.df = pd.read_sql(final_sql, conn)
                 save_to_global_history(user_input, final_sql)
