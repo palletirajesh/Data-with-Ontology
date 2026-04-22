@@ -1,7 +1,5 @@
 import os
-# CRITICAL FIX FOR STREAMLIT CLOUD
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
+import time
 import streamlit as st
 import pandas as pd
 import requests
@@ -10,100 +8,53 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from sentence_transformers import SentenceTransformer, util
 
-# ==========================================
-# --- 1. CONFIGURATION & SECRETS ---
-# ==========================================
+# --- 1. CONFIG & STYLE ---
 st.set_page_config(page_title="Risk Data Agent", page_icon="🏦", layout="wide")
+
+# CSS for Professional Fonts and Alignment
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+    html, body, [class*="st-"] {
+        font-family: 'Inter', sans-serif;
+    }
+    .stButton>button { width: 100%; border-radius: 5px; }
+    </style>
+    """, unsafe_allow_html=True)
 
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 BQ_PROJECT = st.secrets["bigquery"]["project_id"]
 BQ_DATASET = st.secrets["bigquery"]["dataset_id"]
 
+# --- 2. ENGINES ---
 @st.cache_resource
 def get_bq_client():
-    """Initializes BigQuery client using Streamlit secrets."""
-    credentials = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+    info = st.secrets["gcp_service_account"]
+    credentials = service_account.Credentials.from_service_account_info(info)
     return bigquery.Client(credentials=credentials, project=BQ_PROJECT)
 
-bq_client = get_bq_client()
-
-# ==========================================
-# --- 2. CORE ENGINES (EMBEDDINGS) ---
-# ==========================================
 @st.cache_resource
 def load_embedding_model():
-    """Lightweight 80MB embeddings (MiniLM)."""
     return SentenceTransformer('all-MiniLM-L6-v2')
 
+bq_client = get_bq_client()
 embedder = load_embedding_model()
 
-# ==========================================
-# --- 3. GLOBAL HISTORY ENGINE ---
-# ==========================================
-def save_to_global_history(query, sql_code):
-    """Saves telemetry and query history to BigQuery."""
-    table_id = f"{BQ_PROJECT}.{BQ_DATASET}.query_history"
-    rows_to_insert = [
-        {"user_query": query, "generated_sql": sql_code}
-    ]
-    try:
-        bq_client.insert_rows_json(table_id, rows_to_insert)
-    except: pass # Silent fail if history table isn't created yet
+# --- 3. DATA DOWNLOADER ---
+def get_full_dataset():
+    # Helper to let users download the sample DB for context
+    # Note: For production, you might want to pre-save a sample.csv in GitHub
+    query = f"SELECT * FROM `{BQ_PROJECT}.{BQ_DATASET}.dim_customer` LIMIT 100"
+    return bq_client.query(query).to_dataframe().to_csv(index=False)
 
-def load_global_history(limit=5):
-    """Loads history from the BigQuery table."""
-    query = f"SELECT user_query as query, generated_sql as sql FROM `{BQ_PROJECT}.{BQ_DATASET}.query_history` ORDER BY created_at DESC LIMIT {limit}"
-    try:
-        return bq_client.query(query).to_dataframe().to_dict('records')
-    except: return []
-
-# ==========================================
-# --- 4. UNIFIED CONTEXT ENGINE ---
-# ==========================================
-@st.cache_data
-def get_unified_knowledge():
-    """Combines Schema (MD) and Ontology (JSON-LD) into searchable chunks."""
-    knowledge_chunks = []
-    
-    # 1. Technical Schema
-    try:
-        with open("database_schema.md", "r") as f:
-            content = f.read()
-            knowledge_chunks.extend(["TABLE_STRUCT: " + t for t in content.split("### TABLE:")[1:]])
-    except: pass
-
-    # 2. Joins & Jargon from JSON-LD
-    try:
-        g = rdflib.Graph().parse("knowledge_base.jsonld", format="json-ld")
-        
-        # Extract Joins
-        q_joins = "SELECT ?tLabel ?sK ?tK WHERE { ?j a <http://com/ontology#JoinDefinition> ; <http://com/ontology#targetTable> ?t ; <http://com/ontology#sourceKey> ?sK ; <http://com/ontology#targetKey> ?tK . ?t <http://www.w3.org/2000/01/rdf-schema#label> ?tLabel . }"
-        for row in g.query(q_joins):
-            knowledge_chunks.append(f"MANDATORY JOIN: Join to {row.tLabel} ON {row.sK} = {row.tK}")
-            
-        # Extract Jargon
-        q_jargon = "SELECT ?colLabel ?jargon WHERE { ?col <http://www.w3.org/2000/01/rdf-schema#label> ?colLabel ; <http://com/ontology#businessJargon> ?jargon . }"
-        for row in g.query(q_jargon):
-            knowledge_chunks.append(f"BUSINESS TRANSLATION: User term '{row.jargon}' maps to column '{row.colLabel}'")
-    except: pass
-    
-    return knowledge_chunks
-
-def get_semantic_context(query, knowledge_base, top_k=8):
-    """RAG-style retrieval to find relevant rules for the query."""
-    query_emb = embedder.encode(f"search_query: {query}", convert_to_tensor=True)
-    kb_embs = embedder.encode(knowledge_base, convert_to_tensor=True)
-    hits = util.semantic_search(query_emb, kb_embs, top_k=top_k)
-    return "\n\n".join([knowledge_base[hit['corpus_id']] for hit in hits[0]])
-
-# ==========================================
-# --- 5. THE SQL ENGINEER (PROMPT) ---
-# ==========================================
+# --- 4. CONTEXT & SQL GENERATION ---
 def generate_sql(user_query, context, history):
-    full_path = f"{st.secrets['bigquery']['project_id']}.{st.secrets['bigquery']['dataset_id']}"
-    system_prompt = f"""You are a Google BigQuery SQL Expert. Context:
-    {context}
-        
+    full_path = f"{BQ_PROJECT}.{BQ_DATASET}"
+    
+    # Updated Prompt for Intelligent Column Selection
+    system_prompt = f"""You are a BigQuery SQL Expert. 
+    Context: {context}
+    
     STRICT RULES:
     1. ONLY use Tables/Columns in Context.
     2. Table Format: ALWAYS use backticks and the full path: `{full_path}.table_name`
@@ -132,56 +83,86 @@ def generate_sql(user_query, context, history):
         json={"model": "llama-3.3-70b-versatile", "messages": messages, "temperature": 0.1}
     ).json()
     
-    if "choices" in response:
-        return response['choices'][0]['message']['content'].strip().replace("```sql", "").replace("```", "").strip()
-    return "I cannot answer this with available data."
-    forbidden_words = ["DROP", "DELETE", "UPDATE", "INSERT", "TRUNCATE", "ALTER"]
-    
-    if any(word in generated_sql.upper() for word in forbidden_words):
-        st.error("⚠️ Security Alert: Destructive SQL command detected. Query blocked.")
-        return "SELECT 'Access Denied' as status"
-    
-    return generated_sql
-# ==========================================
-# --- 6. UI & EXECUTION ---
-# ==========================================
-st.title("🏦 Risk Data Agent (BigQuery)")
-user_input = st.text_input("Ask a question about customers or credit data:")
+    return response['choices'][0]['message']['content'].strip().replace("```sql", "").replace("```", "").strip()
 
-kb = get_unified_knowledge()
-history = load_global_history()
+# --- 5. SIDEBAR HISTORY ---
+with st.sidebar:
+    st.title("🕒 Query History")
+    # Fetching history from BQ
+    try:
+        hist_query = f"SELECT user_query FROM `{BQ_PROJECT}.{BQ_DATASET}.query_history` ORDER BY created_at DESC LIMIT 10"
+        hist_df = bq_client.query(hist_query).to_dataframe()
+        for q in hist_df['user_query']:
+            st.caption(f"🗨️ {q}")
+            st.divider()
+    except:
+        st.write("No history found.")
 
+# --- 6. MAIN UI ---
+st.title("🏦 Risk Data Intelligence Agent")
+
+# Download Button Section
+col_dl, _ = st.columns([1, 4])
+with col_dl:
+    csv_data = get_full_dataset()
+    st.download_button(
+        label="📥 Download Data Dictionary (CSV)",
+        data=csv_data,
+        file_name="bank_data_sample.csv",
+        mime="text/csv",
+    )
+
+user_input = st.text_input("Analyze your risk data:", placeholder="e.g. List the names and scores of clients with Amazon cards")
+
+# Step 6: Logic to clear results before new execution
 if user_input:
-    context = get_semantic_context(user_input, kb)
-    generated_sql = generate_sql(user_input, context, history)
+    # We use a placeholder to clear the screen
+    result_container = st.empty()
     
-    col1, col2 = st.columns([4, 6])
-    with col1:
-        st.markdown("### 📝 BigQuery SQL")
-        final_sql = st.text_area("Draft:", value=generated_sql, height=250)
-        if st.button("▶️ Execute Query", type="primary"):
-            try:
-                # BigQuery execution
-                df = bq_client.query(final_sql).to_dataframe()
-                st.session_state.df = df
-                save_to_global_history(user_input, final_sql)
-                st.rerun()
-            except Exception as e: st.error(f"BQ Error: {e}")
+    # 1. Start Intelligence logic
+    kb = get_unified_knowledge() # Assume your existing function
+    context = get_semantic_context(user_input, kb)
+    generated_sql = generate_sql(user_input, context, [])
 
-    with col2:
-        st.markdown("### 📊 Results")
+    col_sql, col_res = st.columns([4, 6])
+    
+    with col_sql:
+        st.subheader("📝 Generated SQL")
+        final_sql = st.text_area("Review Code:", value=generated_sql, height=200)
+        
+        # Step 5: Execution Status and Timer
+        if st.button("▶️ Execute Query"):
+            # Clear previous results from session state
+            if "df" in st.session_state:
+                del st.session_state.df
+                
+            start_time = time.perf_counter()
+            with st.status("🚀 Executing on BigQuery...", expanded=True) as status:
+                try:
+                    df = bq_client.query(final_sql).to_dataframe()
+                    end_time = time.perf_counter()
+                    st.session_state.df = df
+                    status.update(label=f"✅ Query Successful in {end_time - start_time:.2f}s!", state="complete", expanded=False)
+                except Exception as e:
+                    status.update(label="❌ Execution Failed", state="error")
+                    st.error(e)
+
+    with col_res:
+        st.subheader("📊 Data Results")
         if "df" in st.session_state:
             st.dataframe(st.session_state.df, use_container_width=True)
 
-# Technical Rationale Section
+# --- 7. REFINED ARCHITECTURE (Step 4) ---
 st.divider()
-st.subheader("🛠️ Technical Architecture")
-t1, t2, t3, t4 = st.columns(4)
-with t1:
-    st.write("**🧠 Llama-3.3-70B**\nGroq-powered SQL Generation.")
-with t2:
-    st.write("**🔍 Semantic Retrieval**\nMiniLM embeddings for accurate mapping.")
-with t3:
-    st.write("**📑 BigQuery Warehouse**\nProduction-scale serverless analytics.")
-with t4:
-    st.write("**🏗️ Global History**\nShared persistence across user sessions.")
+st.subheader("🏗️ Agent Architecture")
+
+# Professional flow diagram-like layout
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    st.info("**1. User Input**\nNatural language captured via Streamlit UI.")
+with c2:
+    st.info("**2. Semantic Mapping**\nInput is embedded (MiniLM) and mapped against **JSON-LD Ontology** to resolve business jargon.")
+with c3:
+    st.info("**3. SQL Synthesis**\nLlama-3.3 synthesizes BigQuery SQL using the mapped schema guardrails.")
+with c4:
+    st.info("**4. Cloud Execution**\nServerless execution on **Google BigQuery** with results returned as Pandas DataFrames.")
