@@ -32,27 +32,69 @@ def load_embedding_model():
 embedder = load_embedding_model()
 
 # We deliberately DO NOT use caching here so Databricks sessions don't go stale
+# ==========================================
+# --- 2. MULTI-TIER CONNECTION ENGINE ---
+# ==========================================
+
 def get_db_connection():
-    """Optimized for Paid Serverless: Handles the wake-up delay."""
+    """Smart Failover: Tries Free Tier first, notifies user on switch to Paid."""
+    
+    # 1. Configuration for both tiers
+    free_config = {
+        "server_hostname": st.secrets["FREE_DB_SERVER_HOSTNAME"],
+        "http_path": st.secrets["FREE_DB_HTTP_PATH"],
+        "access_token": st.secrets["FREE_DB_ACCESS_TOKEN"]
+    }
+    
+    paid_config = {
+        "server_hostname": st.secrets["PAID_DB_SERVER_HOSTNAME"],
+        "http_path": st.secrets["PAID_DB_HTTP_PATH"],
+        "access_token": st.secrets["PAID_DB_ACCESS_TOKEN"]
+    }
+
+    # --- STEP 1: TRY FREE TIER ---
     try:
-        return sql.connect(
-            server_hostname=DB_CONFIG["server_hostname"],
-            http_path=DB_CONFIG["http_path"],
-            access_token=DB_CONFIG["access_token"],
-            # PAID TIER STABILITY FLAGS
-            _retry_delay_min=5,             # Wait 5s between retries
-            _retry_stop_after_attempts_count=10, # Try for ~1 minute
-            _timeout=60                     # Wait up to 60s for session open
-        )
+        conn = sql.connect(**free_config, _timeout=10)
+        # Verify the session is actually open
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        
+        st.sidebar.caption("🟢 Connected: Community Tier (Free)")
+        return conn
+
     except Exception as e:
-        st.error(f"📡 Databricks Warehouse is waking up... Please wait 30s and refresh. Error: {e}")
-        return None
+        error_str = str(e).lower()
+        
+        # Check if this is a "Limit Hit" or "Connection" error
+        if "limit" in error_str or "401" in error_str or "not found" in error_str:
+            
+            # --- NOTIFY THE USER ---
+            st.toast("⚠️ Free Tier limit reached. Switching to Enterprise Failover...", icon="🔄")
+            
+            with st.sidebar.expander("📡 Connection Status", expanded=True):
+                st.warning("Free Tier Quota Exhausted")
+                st.info("Activating Paid Serverless Failover...")
+
+            # --- STEP 2: TRY PAID TIER ---
+            try:
+                conn_paid = sql.connect(
+                    **paid_config,
+                    _retry_delay_min=5,
+                    _retry_stop_after_attempts_count=3
+                )
+                st.sidebar.success("🔵 Connected: Enterprise Tier (Paid)")
+                return conn_paid
+            except Exception as paid_e:
+                st.error(f"❌ Critical Failure: Both DB tiers are unreachable. {paid_e}")
+                return None
+        else:
+            # If it's a different error (like a typo), show it
+            st.error(f"❌ Database Error: {e}")
+            return None
 
 conn = get_db_connection()
 
-# Stop execution if DB is not reachable
 if conn is None:
-    st.warning("⚠️ Database connection not established. Check your Databricks Warehouse status.")
     st.stop()
 
 # --- INVISIBLE TELEMETRY ENGINE ---
