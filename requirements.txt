@@ -1,7 +1,8 @@
 streamlit
 pandas
 google-cloud-bigquery
-pyarrow
+google-auth
 rdflib
 requests
 sentence-transformers
+pyarrow
