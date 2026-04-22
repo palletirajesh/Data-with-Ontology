@@ -1,7 +1,8 @@
-streamlit
+streamlit==1.32.0
 pandas
 duckdb
 pyarrow
 rdflib
 requests
-sentence-transformers
+sentence-transformers==2.5.1
+torch --index-url https://download.pytorch.org/whl/cpu
