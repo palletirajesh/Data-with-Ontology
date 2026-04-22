@@ -1,6 +1,6 @@
 {
   "@context": {
-    "bank": "http://gen_ai_bank.com/ontology#",
+    "bank": "http://com/ontology#",
     "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
     "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
     "owl": "http://www.w3.org/2002/07/owl#",
@@ -16,7 +16,7 @@
     {
       "@id": "bank:fact_card_ledger",
       "@type": "bank:Table",
-      "rdfs:label": "gen_ai_bank.fact_card_ledger (l)",
+      "rdfs:label": "fact_card_ledger (l)",
       "joinsWith": [
         {
           "@type": "bank:JoinDefinition",
@@ -41,7 +41,7 @@
     {
       "@id": "bank:dim_customer",
       "@type": "bank:Table",
-      "rdfs:label": "gen_ai_bank.dim_customer (c)",
+      "rdfs:label": "dim_customer (c)",
       "joinsWith": [
         {
           "@type": "bank:JoinDefinition",
@@ -72,7 +72,7 @@
     {
       "@id": "bank:dim_card_association",
       "@type": "bank:Table",
-      "rdfs:label": "gen_ai_bank.dim_card_association (a)",
+      "rdfs:label": "dim_card_association (a)",
       "joinsWith": [
         {
           "@type": "bank:JoinDefinition",
@@ -95,7 +95,7 @@
     {
       "@id": "bank:fact_credit_bureau",
       "@type": "bank:Table",
-      "rdfs:label": "gen_ai_bank.fact_credit_bureau (f)",
+      "rdfs:label": "fact_credit_bureau (f)",
       "joinsWith": [
         {
           "@type": "bank:JoinDefinition",
