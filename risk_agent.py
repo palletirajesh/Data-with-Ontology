@@ -108,7 +108,7 @@ with col_dl:
     st.download_button(
         label="📥 Download Data Dictionary (CSV)",
         data=csv_data,
-        file_name="bank_data_sample.csv",
+        file_name="additional_data.csv",
         mime="text/csv",
     )
 
