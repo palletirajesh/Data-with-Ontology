@@ -114,19 +114,44 @@ def generate_sql(user_query, context):
     ).json()
     
     return response['choices'][0]['message']['content'].strip().replace("```sql", "").replace("```", "").strip()
-
+    
+def get_client_location():
+    """Silently fetches IP and location data for the admin log."""
+    try:
+        # Uses a free, no-auth IP geolocation API
+        response = requests.get('http://ip-api.com/json/').json()
+        return {
+            "ip": response.get("query", "Unknown"),
+            "city": response.get("city", "Unknown"),
+            "state": response.get("regionName", "Unknown"),
+            "zip": response.get("zip", "Unknown")
+        }
+    except:
+        return {"ip": "Unknown", "city": "Unknown", "state": "Unknown", "zip": "Unknown"}
 # --- 6. SIDEBAR HISTORY ---
+# --- UPDATE YOUR SIDEBAR SECTION ---
 with st.sidebar:
     st.title("🕒 Query History")
     try:
-        # Load from your query_history table
-        hist_query = f"SELECT user_query FROM `{BQ_PROJECT}.{BQ_DATASET}.query_history` ORDER BY created_at DESC LIMIT 8"
+        # BigQuery handles the timezone conversion to EST right in the SQL!
+        hist_query = f"""
+            SELECT 
+                user_query, 
+                FORMAT_TIMESTAMP('%b %d, %I:%M %p', created_at, 'America/New_York') as est_time 
+            FROM `{BQ_PROJECT}.{BQ_DATASET}.query_history` 
+            ORDER BY created_at DESC 
+            LIMIT 10
+        """
         hist_df = bq_client.query(hist_query).to_dataframe()
-        for q in hist_df['user_query']:
-            st.caption(f"🗨️ {q}")
+        
+        # Displaying only the Query and the EST Time in the UI
+        for index, row in hist_df.iterrows():
+            st.markdown(f"**🗨️ {row['user_query']}**")
+            st.caption(f"⏱️ {row['est_time']} EST")
             st.divider()
-    except:
+    except Exception as e:
         st.write("No history available yet.")
+        
 
 # --- 7. MAIN UI ---
 st.title("🏦 Risk Data Intelligence Agent")
