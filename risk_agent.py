@@ -44,13 +44,13 @@ embedder = load_embedding_model()
 def get_unified_knowledge():
     knowledge_chunks = []
     try:
-        with open("database_schema (3).md", "r") as f:
+        with open("database_schema.md", "r") as f:
             content = f.read()
             knowledge_chunks.extend(["TABLE_STRUCT: " + t for t in content.split("### TABLE:")[1:]])
     except: pass
 
     try:
-        g = rdflib.Graph().parse("knowledge_base (3).jsonld", format="json-ld")
+        g = rdflib.Graph().parse("knowledge_base.jsonld", format="json-ld")
         q_joins = "SELECT ?tLabel ?sK ?tK WHERE { ?j a <http://com/ontology#JoinDefinition> ; <http://com/ontology#targetTable> ?t ; <http://com/ontology#sourceKey> ?sK ; <http://com/ontology#targetKey> ?tK . ?t <http://www.w3.org/2000/01/rdf-schema#label> ?tLabel . }"
         for row in g.query(q_joins):
             knowledge_chunks.append(f"MANDATORY JOIN: Join to {row.tLabel} ON {row.sK} = {row.tK}")
@@ -129,7 +129,7 @@ with col_dl:
     st.download_button(
         label="📥 Download Data Sample",
         data=get_full_dataset_csv(),
-        file_name="risk_data_dictionary.csv",
+        file_name="additional_data.csv",
         mime="text/csv",
     )
 
