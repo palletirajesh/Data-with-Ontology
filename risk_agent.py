@@ -16,7 +16,7 @@ GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 # ==========================================
 @st.cache_resource
 def get_db_connection():
-    """Maps your 4 Parquet files to SQL tables."""
+    """Initializes DuckDB and maps your Parquet files to SQL tables."""
     try:
         conn = duckdb.connect(database='bank_data.db', read_only=False)
         tables = ['dim_card_association', 'fact_credit_bureau', 'fact_card_ledger', 'dim_customer']
@@ -37,15 +37,15 @@ def get_db_connection():
 conn = get_db_connection()
 
 # ==========================================
-# --- 3. CONTEXT ENGINE (KEYWORD MATCH) ---
+# --- 3. CONTEXT ENGINE (LIGHTWEIGHT) ---
 # ==========================================
 @st.cache_data
 def get_unified_knowledge():
-    """Loads schema and jargon without needing heavy AI models."""
+    """Loads schema and jargon directly from your files."""
     knowledge = []
     try:
         with open("database_schema.md", "r") as f:
-            knowledge.append(f.read())
+            knowledge.append(f"DATABASE_SCHEMA:\n{f.read()}")
     except: pass
     
     try:
@@ -53,26 +53,23 @@ def get_unified_knowledge():
         q = "SELECT ?label ?jargon WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?label . OPTIONAL { ?s <http://com/ontology#businessJargon> ?jargon } }"
         for row in g.query(q):
             if row.jargon:
-                knowledge.append(f"Mapping: '{row.jargon}' -> Column '{row.label}'")
+                knowledge.append(f"BUSINESS_RULE: '{row.jargon}' refers to column '{row.label}'")
     except: pass
-    return "\n".join(knowledge)
+    return "\n\n".join(knowledge)
 
 # ==========================================
 # --- 4. THE SQL ENGINEER (GROQ) ---
 # ==========================================
 def generate_sql(user_query, metadata):
-    system_prompt = f"""You are a DuckDB Expert. Use this metadata:
+    system_prompt = f"""You are a DuckDB SQL Expert. 
+    Use this metadata to build queries:
     {metadata}
     
-    RULES:
-    1. ONLY use Tables/Columns in Context.
-    2. Use MANDATORY JOINs exactly. Sequence tables logically.
-    3. Output ONLY raw SQL code. No markdown or explanations.
-    4. If data is missing, output EXACTLY: "I cannot answer this with the available data."
-    5. Always begin with a SELECT clause. For multi-table joins, the main FROM table MUST be 'gen_ai_bank.dim_customer'.
-    6. For string filters, use: UPPER(column) = UPPER('value').
-    7. TRANSLATION: Apply BUSINESS TRANSLATION RULES strictly to map user jargon to correct columns.
-    8. GRANULARITY: Unless the user explicitly uses words like 'count', 'total', or 'how many', ALWAYS return a detailed list of records (SELECT *) rather than a summary or count.
+    STRICT RULES:
+    1. ONLY use tables: dim_customer, dim_card_association, fact_card_ledger, fact_credit_bureau.
+    2. Primary table is dim_customer. JOIN others as needed.
+    3. Output ONLY raw SQL. No markdown, no explanations.
+    4. For 'Amazon' cards, JOIN dim_customer to dim_card_association ON card_id and filter card_product_name.
     """
     
     try:
@@ -88,16 +85,17 @@ def generate_sql(user_query, metadata):
                 "temperature": 0
             }
         ).json()
-        sql = response['choices'][0]['message']['content'].strip()
-        return sql.replace("```sql", "").replace("```", "").strip()
-    except:
-        return "SELECT * FROM dim_customer LIMIT 5;"
+        return response['choices'][0]['message']['content'].strip().replace("```sql", "").replace("```", "").strip()
+    except Exception as e:
+        return f"-- Error generating SQL: {e}"
 
 # ==========================================
-# --- 5. UI & EXECUTION ---
+# --- 5. UI ---
 # ==========================================
 st.title("🏦 Risk Data Agent")
-user_input = st.text_input("Ask a question about customers or cards:")
+st.info("System optimized for Python 3.14 (Lightweight Mode)")
+
+user_input = st.text_input("Ask a question about your risk data:")
 
 if user_input:
     metadata = get_unified_knowledge()
@@ -105,26 +103,16 @@ if user_input:
     
     col_l, col_r = st.columns([1, 1])
     with col_l:
-        st.subheader("📝 SQL Code")
-        final_sql = st.text_area("Edit SQL if needed:", value=generated_sql, height=150)
-        if st.button("Run Query"):
+        st.subheader("📝 SQL Logic")
+        final_sql = st.text_area("SQL:", value=generated_sql, height=200)
+        if st.button("Run Query", type="primary"):
             try:
-                df = conn.execute(final_sql).df()
-                st.session_state.df = df
+                res_df = conn.execute(final_sql).df()
+                st.session_state.df = res_df
                 conn.execute("INSERT INTO query_history (user_query, generated_sql) VALUES (?, ?)", [user_input, final_sql])
-            except Exception as e:
-                st.error(f"SQL Error: {e}")
+            except Exception as e: st.error(f"SQL Error: {e}")
 
     with col_r:
         st.subheader("📊 Results")
         if "df" in st.session_state:
             st.dataframe(st.session_state.df)
-
-# History Sidebar
-with st.sidebar:
-    st.header("🕒 Recent Queries")
-    try:
-        history = conn.execute("SELECT user_query FROM query_history ORDER BY created_at DESC LIMIT 5").df()
-        for q in history['user_query']:
-            st.write(f"- {q}")
-    except: pass
