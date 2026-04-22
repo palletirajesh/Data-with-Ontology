@@ -3,7 +3,7 @@ You MUST use fully qualified Databricks table names (catalog.schema.table). Alwa
 
 ---
 
-### TABLE: gen_ai_bank.fact_card_ledger (Alias: l)
+### TABLE: fact_card_ledger (Alias: l)
 **Columns:**
 - `card_id` (string): Card id for the customer
 - `used_amount` (decimal): The amount consumed on the credit card
@@ -23,7 +23,7 @@ You MUST use fully qualified Databricks table names (catalog.schema.table). Alwa
 
 ---
 
-### TABLE: gen_ai_bank.dim_customer (Alias: c)
+### TABLE: dim_customer (Alias: c)
 **Columns:**
 - `cust_id` (string): Unique bank identifier
 - `customer_name` (string): Full name of the customer
@@ -38,7 +38,7 @@ You MUST use fully qualified Databricks table names (catalog.schema.table). Alwa
 
 ---
 
-### TABLE: gen_ai_bank.fact_credit_bureau (Alias: f)
+### TABLE: fact_credit_bureau (Alias: f)
 **Columns:**
 - `ssn_hash` (string): SIN number of the credit card customer
 - `fico_score` (int): Credit score or FICO score
@@ -49,7 +49,7 @@ You MUST use fully qualified Databricks table names (catalog.schema.table). Alwa
 
 ---
 
-### TABLE: gen_ai_bank.dim_card_association (Alias: a)
+### TABLE: dim_card_association (Alias: a)
 **Columns:**
 - `card_id` (string): Unique card ID
 - `card_partner` (string): Partner names (e.g., Amazon, Target)
