@@ -100,12 +100,7 @@ def get_semantic_context(query, knowledge_base, top_k=8):
 # --- 5. THE SQL ENGINEER (PROMPT) ---
 # ==========================================
 def generate_sql(user_query, context, history):
-    project_id = st.secrets["bigquery"]["project_id"]
-    dataset_id = st.secrets["bigquery"]["dataset_id"]
-    
-    # Create the prefix string
-    full_prefix = f"{project_id}.{dataset_id}"
-
+    full_path = f"{st.secrets['bigquery']['project_id']}.{st.secrets['bigquery']['dataset_id']}"
     system_prompt = f"""You are a Google BigQuery SQL Expert. Context:
     {context}
         
@@ -114,7 +109,7 @@ def generate_sql(user_query, context, history):
     2. Use MANDATORY JOINs exactly. Sequence tables logically.
     3. Output ONLY raw SQL code. No markdown or explanations.
     4. If data is missing, output EXACTLY: "I cannot answer this with the available data."
-    5. Always begin with a SELECT clause. For multi-table joins, the main FROM table MUST be 'gen_ai_bank.dim_customer'.
+    5. Always begin with a SELECT clause. For multi-table joins, dim_customer should act a bridge table
     6. For string filters, use: UPPER(column) = UPPER('value').
     7. TRANSLATION: Apply BUSINESS TRANSLATION RULES strictly to map user jargon to correct columns.
     8. GRANULARITY: Unless the user explicitly uses words like 'count', 'total', or 'how many', ALWAYS return a detailed list of records (SELECT *) rather than a summary or count.
