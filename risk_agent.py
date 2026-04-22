@@ -129,7 +129,13 @@ def generate_sql(user_query, context, history):
     if "choices" in response:
         return response['choices'][0]['message']['content'].strip().replace("```sql", "").replace("```", "").strip()
     return "I cannot answer this with available data."
-
+forbidden_words = ["DROP", "DELETE", "UPDATE", "INSERT", "TRUNCATE", "ALTER"]
+    
+    if any(word in generated_sql.upper() for word in forbidden_words):
+        st.error("⚠️ Security Alert: Destructive SQL command detected. Query blocked.")
+        return "SELECT 'Access Denied' as status"
+    
+    return generated_sql
 # ==========================================
 # --- 6. UI & EXECUTION ---
 # ==========================================
