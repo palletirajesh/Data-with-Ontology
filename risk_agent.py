@@ -100,9 +100,15 @@ def get_semantic_context(query, knowledge_base, top_k=8):
 # --- 5. THE SQL ENGINEER (PROMPT) ---
 # ==========================================
 def generate_sql(user_query, context, history):
+    project_id = st.secrets["bigquery"]["project_id"]
+    dataset_id = st.secrets["bigquery"]["dataset_id"]
+    
+    # Create the prefix string
+    full_prefix = f"{project_id}.{dataset_id}"
+
     system_prompt = f"""You are a Google BigQuery SQL Expert. Context:
     {context}
-    
+        
     STRICT RULES:
     1. ONLY use Tables/Columns in Context.
     2. Use MANDATORY JOINs exactly. Sequence tables logically.
