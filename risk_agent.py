@@ -37,65 +37,23 @@ embedder = load_embedding_model()
 # ==========================================
 
 def get_db_connection():
-    """Smart Failover: Tries Free Tier first, notifies user on switch to Paid."""
-    
-    # 1. Configuration for both tiers
-    free_config = {
-        "server_hostname": st.secrets["FREE_DB_SERVER_HOSTNAME"],
-        "http_path": st.secrets["FREE_DB_HTTP_PATH"],
-        "access_token": st.secrets["FREE_DB_ACCESS_TOKEN"]
-    }
-    
-    paid_config = {
-        "server_hostname": st.secrets["PAID_DB_SERVER_HOSTNAME"],
-        "http_path": st.secrets["PAID_DB_HTTP_PATH"],
-        "access_token": st.secrets["PAID_DB_ACCESS_TOKEN"]
-    }
-
-    # --- STEP 1: TRY FREE TIER ---
+    """Connects to a local DuckDB instance (In-Process)."""
     try:
-        conn = sql.connect(**free_config, _timeout=10)
-        # Verify the session is actually open
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT 1")
+        # This creates an in-memory database
+        conn = duckdb.connect(database=':memory:')
         
-        st.sidebar.caption("🟢 Connected: Community Tier (Free)")
+        # 'Register' your parquet files as if they were tables
+        conn.execute("CREATE VIEW dim_customer AS SELECT * FROM 'dim_customer.parquet'")
+        conn.execute("CREATE VIEW fact_risk AS SELECT * FROM 'fact_risk.parquet'")
+        # Add any other tables here...
+        
         return conn
-
     except Exception as e:
-        error_str = str(e).lower()
-        
-        # Check if this is a "Limit Hit" or "Connection" error
-        if "limit" in error_str or "401" in error_str or "not found" in error_str:
-            
-            # --- NOTIFY THE USER ---
-            st.toast("⚠️ Free Tier limit reached. Switching to Enterprise Failover...", icon="🔄")
-            
-            with st.sidebar.expander("📡 Connection Status", expanded=True):
-                st.warning("Free Tier Quota Exhausted")
-                st.info("Activating Paid Serverless Failover...")
+        st.error(f"❌ DuckDB Loading Error: {e}")
+        return None
 
-            # --- STEP 2: TRY PAID TIER ---
-            try:
-                conn_paid = sql.connect(
-                    **paid_config,
-                    _retry_delay_min=5,
-                    _retry_stop_after_attempts_count=3
-                )
-                st.sidebar.success("🔵 Connected: Enterprise Tier (Paid)")
-                return conn_paid
-            except Exception as paid_e:
-                st.error(f"❌ Critical Failure: Both DB tiers are unreachable. {paid_e}")
-                return None
-        else:
-            # If it's a different error (like a typo), show it
-            st.error(f"❌ Database Error: {e}")
-            return None
-
-conn = get_db_connection()
-
-if conn is None:
-    st.stop()
+# The rest of your code remains the same! 
+# DuckDB uses the same SQL syntax as Databricks for 99% of queries.
 
 # --- INVISIBLE TELEMETRY ENGINE ---
 @st.cache_data(ttl=3600)
