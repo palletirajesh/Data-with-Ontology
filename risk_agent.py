@@ -25,7 +25,7 @@ st.markdown("""
 
 # Secrets Management
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-TOGETHER_API_KEY = st.secrets.get("TOGETHER_API_KEY1", "") # Failover Key
+TOGETHER_API_KEY1 = st.secrets.get("TOGETHER_API_KEY1", "") # Failover Key
 BQ_PROJECT = st.secrets["bigquery"]["project_id"]
 BQ_DATASET = st.secrets["bigquery"]["dataset_id"]
 HISTORY_TABLE = f"{BQ_PROJECT}.{BQ_DATASET}.query_history"
