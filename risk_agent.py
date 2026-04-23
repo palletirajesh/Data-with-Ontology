@@ -206,19 +206,27 @@ if user_input:
         # --- THE NEW RETRAINING UI PROMPT ---
         if st.session_state.get("pending_feedback", False):
             st.info("💡 **Looks like you have modified the LLM query. Do you want to retrain the model with these changes?**")
-            if st.button("🧠 Yes, retrain the model"):
-                with st.spinner("Analyzing and updating ontology..."):
-                    evaluate_and_update_ontology(
-                        user_input, 
-                        st.session_state.original_generated_sql, 
-                        st.session_state.edited_sql_for_feedback
-                    )
-                # Clear the flag so the button disappears after clicking
-                st.session_state.pending_feedback = False
-                st.rerun()
-
-        if "last_df" in st.session_state:
-            st.dataframe(st.session_state.last_df, use_container_width=True)
+            
+            # Create columns to place the buttons side-by-side
+            btn_col1, btn_col2, _ = st.columns([1.5, 1.5, 4]) 
+            
+            with btn_col1:
+                if st.button("🧠 Yes, retrain the model", use_container_width=True):
+                    with st.spinner("Analyzing and updating ontology..."):
+                        evaluate_and_update_ontology(
+                            user_input, 
+                            st.session_state.original_generated_sql, 
+                            st.session_state.edited_sql_for_feedback
+                        )
+                    # Clear the flag and force an immediate UI refresh
+                    st.session_state.pending_feedback = False
+                    st.rerun()
+                    
+            with btn_col2:
+                if st.button("❌ No, ignore", type="secondary", use_container_width=True):
+                    # Just clear the flag and force an immediate UI refresh
+                    st.session_state.pending_feedback = False
+                    st.rerun()
 
 # --- 6. ARCHITECTURE DETAILS ---
 st.divider()
