@@ -13,6 +13,7 @@ from google.oauth2 import service_account
 from sentence_transformers import SentenceTransformer, util
 
 # --- 0. SUPPRESS LOG NOISE ---
+# Silences the torchvision/transformers noise from your logs
 logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("torch").setLevel(logging.ERROR)
 
@@ -48,8 +49,9 @@ def load_embedder():
 
 embedder = load_embedder()
 
-# --- 3. LLM ROUTER (Primary & Fallback) ---
+# --- 3. LLM ROUTER ---
 def call_llm_with_fallback(prompt):
+    """Primary: Groq | Fallback: Together AI"""
     url_groq = "https://api.groq.com/openai/v1/chat/completions"
     headers_groq = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "temperature": 0.0}
@@ -93,39 +95,32 @@ def build_context_string():
 
 def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
     """
-    Advanced Logic: Updates Graph nodes based on specific Banking Ontology rules.
-    Links bank:Column -> bank:representsConcept -> bank:Concept -> bank:businessJargon
+    Architectural Retraining:
+    Links User Terms -> businessJargon -> bank:Concept -> bank:Column
     """
     try:
         with open("knowledge_base.jsonld", "r") as f:
-            ontology_context = f.read()
-    except:
-        ontology_context = "Ontology file missing."
+            ontology_sample = f.read()
+    except: ontology_sample = "Ontology file missing."
 
+    # Instruct the LLM to act as a Librarian for the graph
     prompt = f"""
-    You are an Ontology Engineer for a Banking Risk Data Warehouse.
+    You are an Ontology Engineer for a Bank.
+    User Question: "{user_text}"
+    Original AI SQL: {original_sql}
+    User Corrected SQL: {edited_sql}
     
-    CONTEXT ONTOLOGY:
-    {ontology_context[:3000]}
-
-    USER INPUT: "{user_text}"
-    AI SQL: {original_sql}
-    USER CORRECTED SQL: {edited_sql}
-
-    TASK: Analyze why the user corrected the SQL. Update the JSON-LD '@graph'.
+    TASK: Extract new business jargon or concept mappings based on the user's manual correction.
     
-    STRICT ONTOLOGY RULES:
-    1. If the user fixed a filter (e.g., changed column name or value): 
-       - Find the Concept that represents that business term.
-       - Add the user's specific wording to that Concept's "bank:businessJargon" set.
-    2. If the user introduced a new logical Concept:
-       - Create a new node with "@type": "bank:Concept".
-       - Create a node for the "@type": "bank:Column" used.
-       - Link them using "bank:representsConcept".
-    3. Use the "bank:" prefix for all new @ids.
-    4. If the edit is trivial (whitespace), return: MISMATCH.
-
-    Output ONLY the JSON array of the specific nodes to be added/updated in the graph.
+    ONTOLOGY RULES:
+    1. If the user fixed a filter value or column (e.g., 'Target' mapping to 'card_partner'), find the associated Concept.
+    2. Add new jargon to the "bank:businessJargon" array of that Concept.
+    3. Use "bank:" prefix for all IDs.
+    4. Follow the format of existing nodes:
+    {ontology_sample[:1500]}
+    
+    Return a raw JSON array of the nodes to be MERGED into the @graph. 
+    If no significant logic changes, return: MISMATCH.
     """
     
     response = call_llm_with_fallback(prompt)
@@ -135,11 +130,9 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
     try:
         clean = response.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\[.*\]', clean, re.DOTALL)
-        if not match: return {"status": "error", "msg": "AI failed to generate valid graph nodes."}
+        if not match: return {"status": "error", "msg": "AI generated invalid JSON graph nodes."}
         
         new_nodes = json.loads(match.group(0))
-
-        # GitHub Sync
         auth = Auth.Token(st.secrets["github"]["token"])
         g = Github(auth=auth)
         repo = g.get_repo(st.secrets["github"]["repo"])
@@ -147,39 +140,35 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
         kb = json.loads(contents.decoded_content.decode("utf-8"))
         graph = kb.get("@graph", [])
 
-        # Merge new nodes into existing graph
-        for new_node in new_nodes:
-            new_node["dateAdded"] = date.today().isoformat()
-            new_node["reviewStatus"] = "Pending_Review"
-            
-            # Check for existing @id to merge jargon instead of duplicating
+        # Merge nodes based on @id
+        for n in new_nodes:
+            n["dateAdded"] = date.today().isoformat()
+            n["reviewStatus"] = "Pending_Review"
             found = False
             for existing in graph:
-                if existing.get("@id") == new_node.get("@id"):
-                    if "bank:businessJargon" in new_node and "bank:businessJargon" in existing:
-                        existing["bank:businessJargon"] = list(set(existing["bank:businessJargon"]) | set(new_node["bank:businessJargon"]))
-                    existing.update({k: v for k, v in new_node.items() if k != "bank:businessJargon"})
+                if existing.get("@id") == n.get("@id"):
+                    if "bank:businessJargon" in n and "bank:businessJargon" in existing:
+                        existing["bank:businessJargon"] = list(set(existing["bank:businessJargon"]) | set(n["bank:businessJargon"]))
+                    existing.update({k: v for k, v in n.items() if k != "bank:businessJargon"})
                     found = True; break
-            if not found: graph.append(new_node)
+            if not found: graph.append(n)
 
         kb["@graph"] = graph
-        repo.update_file(contents.path, f"🧠 Ontology Retrain: {user_text[:20]}", json.dumps(kb, indent=2), contents.sha, branch="main")
-        return {"status": "success", "msg": "GitHub Knowledge Base Updated Successfully!"}
+        repo.update_file(contents.path, f"🧠 Knowledge Loop: {user_text[:20]}", json.dumps(kb, indent=2), contents.sha, branch="main")
+        return {"status": "success", "msg": "Ontology synchronized with GitHub!"}
     except Exception as e:
-        return {"status": "error", "msg": f"GitHub Error: {e}"}
+        return {"status": "error", "msg": f"GitHub Push Failed: {e}"}
 
 # --- 5. SIDEBAR ---
 if "db_history" not in st.session_state:
     st.session_state.db_history = load_persistent_history()
 
 with st.sidebar:
-    st.header("🕒 Query History")
-    if st.button("🔄 Sync with BigQuery", width='stretch'):
+    st.header("🕒 History")
+    if st.button("🔄 Sync History", width='stretch'):
         st.session_state.db_history = load_persistent_history()
     
-    st.markdown("---")
     for idx, row in st.session_state.db_history.iterrows():
-        # Clicking restores full text and SQL to UI
         if st.button(row['user_query'], key=f"h_{idx}", width='stretch'):
             st.session_state.main_input = row['user_query']
             st.session_state.sql_editor_key = row['generated_sql']
@@ -197,15 +186,13 @@ if "retrain_result" in st.session_state:
     else: st.error(res["msg"])
     del st.session_state.retrain_result
 
-user_input = st.text_input("What risk data do you need?", key="main_input")
+user_input = st.text_input("What data do you need?", key="main_input", placeholder="e.g. Amazon customers with late payments...")
 
 if user_input:
     st.session_state["last_user_input_preserved"] = user_input
     col_sql, col_res = st.columns([1, 1.5])
     
     with col_sql:
-        st.subheader("⚙️ Generated Logic")
-        
         if "last_user_input" not in st.session_state or st.session_state.last_user_input != user_input:
             # Semantic Cache
             cached_sql = None
@@ -217,11 +204,11 @@ if user_input:
                 st.toast("⚡ Reusing Logic from Cache")
                 final_sql = cached_sql
             else:
-                with st.spinner("Synthesizing SQL (19-Rule Mode)..."):
+                with st.spinner("Synthesizing Logic (Strict Rules Applied)..."):
                     context = build_context_string()
                     full_path = f"{BQ_PROJECT}.{BQ_DATASET}"
                     
-                    # --- RESTORED FULL 19 RULES PROMPT ---
+                    # --- THE 19 RULES PROMPT ---
                     system_prompt = (
                         "You are a BigQuery SQL Expert.\n\nContext:\n" + context + "\n\n"
                         "STRICT RULES:\n"
@@ -236,7 +223,7 @@ if user_input:
                         "10. If missing, output: 'I cannot answer this with available data.'\n"
                         "11. dim_customer is the bridge table.\n"
                         f"12. Prefix tables with: `{full_path}.`\n"
-                        "15. For filters, use: UPPER(column) = UPPER('value').\n"
+                        "15. For filters, use: UPPER(column) = UPPER('value'). (e.g. UPPER(t1.card_partner) = UPPER('Target'))\n"
                         "16. Apply BUSINESS TRANSLATION RULES strictly.\n"
                         "17. Any column in WHERE/HAVING must be in SELECT.\n"
                         "18. Return detailed records unless summary keywords are used.\n"
@@ -244,7 +231,8 @@ if user_input:
                         f"Write BigQuery SQL for: \"{user_input}\""
                     )
                     final_sql = call_llm_with_fallback(system_prompt).replace("```sql", "").replace("```", "").strip()
-                    save_query_to_db(user_input, final_sql)
+                    if "SELECT" in final_sql.upper():
+                        save_query_to_db(user_input, final_sql)
             
             st.session_state.last_user_input = user_input
             st.session_state.original_generated_sql = final_sql
@@ -253,7 +241,7 @@ if user_input:
 
         with st.form("sql_form"):
             user_sql = st.text_area("SQL Preview:", value=st.session_state.get('sql_editor_key', ''), height=250)
-            if st.form_submit_button("▶️ Execute Query"):
+            if st.form_submit_button("▶️ Execute"):
                 try:
                     job = bq_client.query(user_sql)
                     st.session_state.last_df = job.result(timeout=30).to_dataframe(create_bqstorage_client=False)
@@ -263,22 +251,15 @@ if user_input:
                 except Exception as e: st.error(f"BQ Error: {e}")
 
     with col_res:
-        st.subheader("📊 Results")
         if st.session_state.get("pending_feedback"):
             st.info("💡 **Retrain model with your SQL edits?**")
-            b1, b2, _ = st.columns([1.5, 1.5, 4])
-            with b1:
-                if st.button("🧠 Yes, Retrain", width='stretch'):
-                    _q = st.session_state.get("last_user_input_preserved", "")
-                    _o = st.session_state.original_generated_sql
-                    _e = st.session_state.edited_sql_for_feedback
-                    st.session_state.retrain_result = evaluate_and_update_ontology(_q, _o, _e)
-                    st.session_state.pending_feedback = False
-                    st.rerun()
-            with b2:
-                if st.button("❌ No", width='stretch'):
-                    st.session_state.pending_feedback = False
-                    st.rerun()
+            if st.button("🧠 Yes, Retrain", width='stretch'):
+                _q = st.session_state.get("last_user_input_preserved", "")
+                _o = st.session_state.original_generated_sql
+                _e = st.session_state.edited_sql_for_feedback
+                st.session_state.retrain_result = evaluate_and_update_ontology(_q, _o, _e)
+                st.session_state.pending_feedback = False
+                st.rerun()
 
         if "last_df" in st.session_state:
             st.dataframe(st.session_state.last_df, use_container_width=True)
