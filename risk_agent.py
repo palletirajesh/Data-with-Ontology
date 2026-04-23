@@ -48,7 +48,7 @@ def load_embedder():
 
 embedder = load_embedder()
 
-# --- 3. LLM ROUTER ---
+# --- 3. LLM ROUTER (Primary & Fallback) ---
 def call_llm_with_fallback(prompt):
     url_groq = "https://api.groq.com/openai/v1/chat/completions"
     headers_groq = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
@@ -92,75 +92,120 @@ def build_context_string():
     return context
 
 def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
-    """Refined GitHub Push with enhanced JSON validation."""
-    prompt = f"""Compare these SQL queries for the question: "{user_text}"
-    Original: {original_sql}
-    User Edit: {edited_sql}
+    """
+    Analyzes SQL corrections to update the JSON-LD Graph.
+    Follows: Column -> bank:representsConcept -> bank:Concept -> bank:businessJargon
+    """
+    # Load current ontology to teach the LLM the current relationships
+    try:
+        with open("knowledge_base.jsonld", "r") as f:
+            ontology_data = f.read()
+    except:
+        ontology_data = "Ontology file missing."
+
+    prompt = f"""
+    You are an Ontology Engineer for a Banking Data Warehouse.
     
-    Identify the new business mapping. 
-    Return a STRICT JSON array of objects.
-    Example format: [{{"term": "...", "original_mapping": "...", "correct_mapping": "..."}}]
-    If no significant logic changes, return exactly: MISMATCH
-    IMPORTANT: Ensure the JSON is perfectly formatted with commas between objects."""
+    CONTEXT ONTOLOGY (JSON-LD):
+    {ontology_data[:3000]} 
+
+    USER INTERACTION:
+    Question: "{user_text}"
+    AI Original SQL: {original_sql}
+    User Corrected SQL: {edited_sql}
+
+    TASK:
+    Analyze the user's SQL correction. Your goal is to update the JSON-LD Knowledge Graph.
+    
+    SCENARIOS:
+    1. If the user corrected a Column choice: Find the Concept linked to that column. Add any new terms from the question to that Concept's "bank:businessJargon" array.
+    2. If a new logic was introduced: Create a new "bank:Concept" and link the relevant "bank:Column" to it using "bank:representsConcept".
+    3. If the correction was just formatting: Return "MISMATCH".
+
+    OUTPUT:
+    Return a JSON array of NEW or UPDATED nodes for the "@graph". 
+    Use the "bank:" prefix for @ids.
+    Example: 
+    [
+      {{
+        "@id": "bank:Concept_Debt",
+        "@type": "bank:Concept",
+        "bank:businessJargon": ["used amount", "current balance", "debt"]
+      }}
+    ]
+
+    Return ONLY the raw JSON array. No preamble.
+    """
     
     response = call_llm_with_fallback(prompt)
     
     if not response or response.strip().upper() == "MISMATCH":
-        return {"status": "warning", "msg": "Retrain Skipped: No logic changes detected."}
+        return {"status": "warning", "msg": "Ontology Update Skipped: No new business logic detected."}
 
     try:
-        # 1. PARSE NEW MAPPINGS FROM AI
+        # Clean response and parse JSON
         clean = response.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\[.*\]', clean, re.DOTALL)
-        if not match: 
-            return {"status": "error", "msg": "AI failed to generate a valid JSON array."}
+        if not match: return {"status": "error", "msg": "AI failed to generate structural JSON."}
         
-        try:
-            new_mappings = json.loads(match.group(0))
-        except json.JSONDecodeError as je:
-            return {"status": "error", "msg": f"AI generated malformed JSON: {je}"}
-        
-        # 2. CONNECT TO GITHUB
+        new_nodes = json.loads(match.group(0))
+
+        # GitHub Connection
         auth = Auth.Token(st.secrets["github"]["token"])
         g = Github(auth=auth)
         repo = g.get_repo(st.secrets["github"]["repo"])
         
-        # 3. FETCH AND VALIDATE EXISTING FILE
+        # Load Existing File from Git
         contents = repo.get_contents("knowledge_base.jsonld", ref="main")
-        raw_content = contents.decoded_content.decode("utf-8")
-        
-        try:
-            kb = json.loads(raw_content)
-        except json.JSONDecodeError as je:
-            return {"status": "error", "msg": f"CRITICAL: The knowledge_base.jsonld file ON GITHUB is currently corrupted at {je}. Please fix it manually."}
-        
-        # 4. UPDATE DATA
-        today = date.today().isoformat()
-        for m in new_mappings:
-            m["dateAdded"] = today
-            m["reviewStatus"] = "Pending_Review"
+        kb = json.loads(contents.decoded_content.decode("utf-8"))
+        graph = kb.get("@graph", [])
+
+        # MERGE LOGIC: Update existing nodes or append new ones
+        updated_count = 0
+        for new_node in new_nodes:
+            new_node["dateAdded"] = date.today().isoformat()
+            new_node["reviewStatus"] = "Pending_Review"
             
-        kb.setdefault("@graph", []).extend(new_mappings)
+            # Check if node already exists in graph to merge businessJargon
+            found = False
+            for existing_node in graph:
+                if existing_node.get("@id") == new_node.get("@id"):
+                    # Merge jargon sets to avoid duplicates
+                    if "bank:businessJargon" in new_node and "bank:businessJargon" in existing_node:
+                        combined = list(set(existing_node["bank:businessJargon"]) | set(new_node["bank:businessJargon"]))
+                        existing_node["bank:businessJargon"] = combined
+                    # Update other fields
+                    existing_node.update({k: v for k, v in new_node.items() if k != "bank:businessJargon"})
+                    found = True
+                    updated_count += 1
+                    break
+            
+            if not found:
+                graph.append(new_node)
+                updated_count += 1
+
+        kb["@graph"] = graph
         
-        # 5. PUSH CLEAN JSON
+        # Push to GitHub
         repo.update_file(
             path=contents.path,
-            message=f"🤖 AI Retrain: {user_text[:20]}",
+            message=f"🧠 Ontology Sync: {user_text[:20]}",
             content=json.dumps(kb, indent=2),
             sha=contents.sha,
             branch="main"
         )
-        return {"status": "success", "msg": f"GitHub Updated: {len(new_mappings)} mappings added!"}
+        return {"status": "success", "msg": f"Ontology Updated: {updated_count} nodes synchronized."}
+        
     except Exception as e:
-        return {"status": "error", "msg": f"GitHub Push Failed: {e}"}
+        return {"status": "error", "msg": f"Ontology Sync Failed: {e}"}
 
-# --- 5. SIDEBAR ---
+# --- 5. UI & SIDEBAR ---
 if "db_history" not in st.session_state:
     st.session_state.db_history = load_persistent_history()
 
 with st.sidebar:
     st.header("🕒 History")
-    if st.button("🔄 Sync History", width='stretch'):
+    if st.button("🔄 Sync with BigQuery", width='stretch'):
         st.session_state.db_history = load_persistent_history()
     
     for idx, row in st.session_state.db_history.iterrows():
@@ -174,6 +219,7 @@ with st.sidebar:
 # --- 6. MAIN WORKFLOW ---
 st.title("🏦 Risk Data Agent")
 
+# Persist feedback result across rerun
 if "retrain_result" in st.session_state:
     res = st.session_state.retrain_result
     if res["status"] == "success": st.success(res["msg"])
@@ -181,7 +227,7 @@ if "retrain_result" in st.session_state:
     else: st.error(res["msg"])
     del st.session_state.retrain_result
 
-user_input = st.text_input("What data do you need?", key="main_input")
+user_input = st.text_input("What risk data do you need?", key="main_input")
 
 if user_input:
     st.session_state["last_user_input_preserved"] = user_input
@@ -189,6 +235,7 @@ if user_input:
     
     with col_sql:
         if "last_user_input" not in st.session_state or st.session_state.last_user_input != user_input:
+            # Semantic Cache
             cached_sql = None
             if not st.session_state.db_history.empty:
                 scores = util.cos_sim(embedder.encode(user_input), embedder.encode(st.session_state.db_history['user_query'].tolist()))[0]
@@ -198,13 +245,15 @@ if user_input:
                 st.toast("⚡ Using Cached Logic")
                 final_sql = cached_sql
             else:
-                with st.spinner("Generating SQL..."):
+                with st.spinner("Synthesizing SQL..."):
                     context = build_context_string()
                     full_path = f"{BQ_PROJECT}.{BQ_DATASET}"
+                    # THE 19 RULES
                     system_prompt = (
                         "You are a BigQuery SQL Expert.\n\nContext:\n" + context + "\n\n"
-                        "RULES: 1. Use Context only. 2. No SELECT *. 3. Always select: cust_id, customer_name, card_id.\n"
-                        "4. Join tables as needed. 5. Prefix: " + full_path + ". 6. RAW SQL ONLY.\n\nTask: " + user_input
+                        "STRICT RULES:\n1. Use Context only. 2. No SELECT *. 3. Always select: cust_id, customer_name, card_id.\n"
+                        "4. Join tables as needed. 5. Prefix: " + full_path + ". 6. Use aliases.\n"
+                        "7. RAW SQL ONLY. No explanations.\n\nTask: " + user_input
                     )
                     final_sql = call_llm_with_fallback(system_prompt).replace("```sql", "").replace("```", "").strip()
                     save_query_to_db(user_input, final_sql)
@@ -227,7 +276,7 @@ if user_input:
 
     with col_res:
         if st.session_state.get("pending_feedback"):
-            st.info("💡 **Retrain the model with your SQL edits?**")
+            st.info("💡 **Retrain model with your SQL edits?**")
             b1, b2, _ = st.columns([1.5, 1.5, 4])
             with b1:
                 if st.button("🧠 Yes, Retrain", width='stretch'):
