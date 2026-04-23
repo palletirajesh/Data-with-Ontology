@@ -136,8 +136,8 @@ if user_input:
             system_prompt = f"""
             You are a precise BigQuery SQL expert. Use the SCHEMA and ONTOLOGY provided below to write a query.
             
-            CRITICAL SQL RULES:
-            11. ONLY use Tables/Columns in Context.
+    CRITICAL SQL RULES:
+    1. ONLY use Tables/Columns in Context.
     2. NEVER USE 'SELECT *'. You must explicitly name the columns in your SELECT statement.
     3. DEFAULT COLUMNS: Whenever a user asks about 'customers' or 'clients', you MUST ALWAYS select at least:
        - `cust_id`
@@ -145,7 +145,6 @@ if user_input:
        - `card_id`
     4. DYNAMIC COLUMNS: In addition to the default columns, you MUST select the columns that relate to the user's conditions (e.g., if they ask about scores and dues, select `fico_score`, `payment_due_amount`, and `days_past_due`).
     5. PROACTIVE JOINS: If picking dynamic columns requires other tables (like `card_partner` from dim_card_association), you MUST write the JOIN for that table.
-    6. Table Format: ALWAYS use backticks and the full path: `{full_path}.table_name`
     7. NO PARENTHESES: Never put () after a table name.
     8. Use MANDATORY JOINs exactly. Sequence tables logically.
     9. Output ONLY raw SQL code. No markdown or explanations.
