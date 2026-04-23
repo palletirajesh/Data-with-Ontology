@@ -184,6 +184,13 @@
       "correct_mapping": "t3.fico_score < 650",
       "dateAdded": "2026-04-23",
       "reviewStatus": "Pending_Review"
+    },
+    {
+      "term": "FICO Score Threshold",
+      "original_mapping": "t3.fico_score > 700",
+      "correct_mapping": "t3.fico_score < 650",
+      "dateAdded": "2026-04-23",
+      "reviewStatus": "Pending_Review"
     }
   ]
 }
