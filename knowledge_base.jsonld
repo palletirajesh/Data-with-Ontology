@@ -182,25 +182,10 @@
       ]
     },
     {
-      "term": "FICO Score Threshold",
-      "original_mapping": "t3.fico_score > 700",
-      "correct_mapping": "t3.fico_score < 650",
-      "dateAdded": "2026-04-23",
-      "reviewStatus": "Pending_Review"
-    },
-    {
-      "term": "FICO Score Threshold",
-      "original_mapping": "t3.fico_score > 700",
-      "correct_mapping": "t3.fico_score < 650",
-      "dateAdded": "2026-04-23",
-      "reviewStatus": "Pending_Review"
-    },
-    {
       "@id": "bank:Concept_Credit_Worthiness",
       "@type": "bank:Concept",
       "bank:businessJargon": [
         "high risk",
-        "good payments",
         "fico score",
         "credit score"
       ],
@@ -208,7 +193,7 @@
         "bank:col_fico_score"
       ],
       "dateAdded": "2026-04-23",
-      "reviewStatus": "Pending_Review"
+      "reviewStatus": "Accepted"
     },
     {
       "@id": "bank:Concept_Payment_History",
@@ -221,7 +206,7 @@
         "bank:col_days_past_due"
       ],
       "dateAdded": "2026-04-23",
-      "reviewStatus": "Pending_Review"
+      "reviewStatus": "Accepted"
     }
   ]
 }
