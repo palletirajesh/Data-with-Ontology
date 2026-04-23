@@ -130,8 +130,7 @@ def build_context_string():
     return context
 
 def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
-    """Pushes knowledge updates to GitHub."""
-    # Precision Prompt Fix: Improved extraction logic
+    """Returns a dict: {"ok": bool, "msg": str}"""
     prompt = f"""You are a SQL knowledge extractor. Compare these two queries and extract what changed.
     User Question: "{user_text}"
     Original AI SQL: {original_sql}
@@ -141,35 +140,36 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
     - "original_mapping": what the AI incorrectly used
     - "correct_mapping": what the user corrected it to
     - "correction_type": one of ["table_name", "column_name", "filter_value", "join_logic", "business_rule"]
-    If the SQLs are identical or only differ in whitespace, return exactly: MISMATCH
-    Return ONLY the JSON array or MISMATCH. No explanation."""
-    
+    If the SQLs are identical or only differ in whitespace, return exactly the single word: MISMATCH
+    Return ONLY the JSON array or the single word MISMATCH. Absolutely no other text."""
+
     response = call_llm_with_fallback(prompt)
-    
-    if "MISMATCH" in response:
-        st.warning("Retrain Skipped: AI found no logic differences.")
-        return
+
+    # BUG FIX: Exact match instead of substring — avoids false MISMATCH on valid responses
+    if response.strip().upper() == "MISMATCH":
+        return {"ok": False, "msg": "⚠️ Retrain Skipped: No logic differences found by AI."}
 
     try:
         clean = response.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\[.*\]', clean, re.DOTALL)
-        if not match: return
-        
+        if not match:
+            return {"ok": False, "msg": f"❌ AI returned unparseable format. Raw response: {response[:200]}"}
+
         new_mappings = json.loads(match.group(0))
         today = date.today().isoformat()
         for m in new_mappings:
             m["dateAdded"] = today
             m["reviewStatus"] = "Pending_Review"
-        
+
         auth = Auth.Token(st.secrets["github"]["token"])
         g = Github(auth=auth)
         repo = g.get_repo(st.secrets["github"]["repo"])
-        
+
         file_path = "knowledge_base.jsonld"
         contents = repo.get_contents(file_path, ref="main")
         kb = json.loads(contents.decoded_content.decode("utf-8"))
         kb.setdefault("@graph", []).extend(new_mappings)
-        
+
         repo.update_file(
             path=contents.path,
             message=f"🤖 AI Retrain: {user_text[:20]}",
@@ -177,9 +177,9 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
             sha=contents.sha,
             branch="main"
         )
-        st.success(f"✅ GitHub Updated: {len(new_mappings)} new rules added!")
+        return {"ok": True, "msg": f"✅ GitHub Updated: {len(new_mappings)} new rules added!"}
     except Exception as e:
-        st.error(f"❌ GitHub Push Failed: {e}")
+        return {"ok": False, "msg": f"❌ GitHub Push Failed: {e}"}
 
 # --- 5. UI & SIDEBAR SYNC ---
 if "db_history" not in st.session_state:
@@ -187,18 +187,19 @@ if "db_history" not in st.session_state:
 
 with st.sidebar:
     st.header("🕒 Query History")
-    if st.button("🔄 Sync with BQ", width='stretch'): # Updated to width='stretch'
-        st.session_state.db_history = load_persistent_history()
-    
-    st.markdown("---")
-    for idx, row in st.session_state.db_history.iterrows():
-        if st.button(row['user_query'], key=f"h_{idx}", width='stretch'):
-            st.session_state.main_input = row['user_query']
-            st.session_state.sql_editor_key = row['generated_sql']
-            st.session_state.last_user_input = row['user_query']
-            st.session_state.original_generated_sql = row['generated_sql']
-            st.rerun()
+    if st.button("🧠 Yes, Retrain", width='stretch'):
+        _user_text = st.session_state.get("last_user_input_preserved", "")
+        _orig_sql  = st.session_state.original_generated_sql
+        _edit_sql  = st.session_state.edited_sql_for_feedback
 
+        with st.spinner("Analyzing edits & updating ontology..."):
+            result = evaluate_and_update_ontology(_user_text, _orig_sql, _edit_sql)
+
+    # Store result BEFORE rerun so it survives the page refresh
+        st.session_state["ontology_update_result"] = result
+        st.session_state.pending_feedback = False
+        st.rerun()
+        
 # --- 6. MAIN WORKFLOW ---
 st.title("🏦 Risk Data Agent")
 user_input = st.text_input("What risk data do you need?", key="main_input", placeholder="e.g. Amazon customers with late payments...")
@@ -292,6 +293,11 @@ if user_input:
                 if st.button("❌ No, Ignore", width='stretch'):
                     st.session_state.pending_feedback = False
                     st.rerun()
-
+        if "ontology_update_result" in st.session_state:
+            result = st.session_state.pop("ontology_update_result")  # show once, then clear
+            if result["ok"]:
+                st.success(result["msg"])
+            else:
+                st.warning(result["msg"])
         if "last_df" in st.session_state:
             st.dataframe(st.session_state.last_df, use_container_width=True)
