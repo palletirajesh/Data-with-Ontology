@@ -7,6 +7,9 @@ import rdflib
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from sentence_transformers import SentenceTransformer, util
+import json
+from datetime import date
+
 
 # --- 1. CONFIG & STYLE ---
 st.set_page_config(page_title="Risk Data Agent", page_icon="🏦", layout="wide")
@@ -114,6 +117,38 @@ def generate_sql(user_query, context):
     ).json()
     
     return response['choices'][0]['message']['content'].strip().replace("```sql", "").replace("```", "").strip()
+    # 1. Store the generated SQL in session state so it doesn't reset on interaction
+    if "current_sql" not in st.session_state:
+        st.session_state.current_sql = final_sql # From your Llama-3 output
+    if "original_prompt" not in st.session_state:
+        st.session_state.original_prompt = user_input # The original text prompt
+
+    st.subheader("📝 Review and Edit SQL")
+# 2. Provide a text area for the user to edit the query
+    user_edited_sql = st.text_area(
+        "Modify the query below if needed before running:", 
+        value=st.session_state.current_sql, 
+        height=250
+    )
+
+# 3. Use a form or a button to trigger execution of the EDITED query
+    if st.button("▶️ Execute Query"):
+        start_time = time.perf_counter()
+        with st.status("🚀 Running BigQuery Job...", expanded=True) as status:
+            try:
+            # RUN THE EDITED SQL, NOT THE ORIGINAL
+                df = bq_client.query(user_edited_sql).to_dataframe()
+                end_time = time.perf_counter()
+                st.session_state.last_df = df
+                status.update(label=f"✅ Query Finished in {end_time - start_time:.2f}s", state="complete", expanded=False)
+            
+                # 4. TRIGGER THE FEEDBACK LOOP IF THE QUERY WAS CHANGED
+                if user_edited_sql.strip() != st.session_state.current_sql.strip():
+                    evaluate_and_update_ontology(st.session_state.original_prompt, st.session_state.current_sql, user_edited_sql)
+                
+            except Exception as e:
+                status.update(label="❌ Query Error", state="error")
+                st.error(e)
     
 def get_client_location():
     """Silently fetches IP and location data for the admin log."""
@@ -152,7 +187,53 @@ with st.sidebar:
     except Exception as e:
         st.write("No history available yet.")
         
-
+def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
+    """Evaluates user SQL edits, adds tracking metadata, and updates JSON-LD."""
+    
+    evaluation_prompt = f"""
+    The user asked: "{user_text}"
+    The AI generated: "{original_sql}"
+    The User corrected to: "{edited_sql}"
+    
+    Did the user fix a table join, column mapping, or business jargon? 
+    If YES, extract the new mapping as a valid JSON array of objects (using our bank ontology).
+    If NO, return exactly "MISMATCH".
+    """
+    
+    # Call Groq (Llama-3)
+    response = call_groq_llm(evaluation_prompt) 
+    
+    if "MISMATCH" not in response:
+        try:
+            # Parse the LLM's JSON response
+            new_knowledge_json = json.loads(response)
+            
+            # Ensure it's a list for iteration
+            if isinstance(new_knowledge_json, dict):
+                new_knowledge_json = [new_knowledge_json]
+                
+            # --- INJECT TRACKING METADATA ---
+            today_str = date.today().isoformat()
+            for item in new_knowledge_json:
+                item["dateAdded"] = today_str
+                item["reviewStatus"] = "Pending_Review"
+            # --------------------------------
+            
+            st.toast(f"🔄 Learned new mapping. Flagged for review on {today_str}.")
+            
+            # Convert back to string and merge into rdflib Graph
+            g = rdflib.Graph()
+            g.parse("knowledge_base_23Ap.jsonld", format="json-ld")
+            
+            new_graph = rdflib.Graph().parse(data=json.dumps(new_knowledge_json), format="json-ld")
+            g += new_graph
+            
+            # Save the updated file
+            g.serialize(destination="knowledge_base_23Ap.jsonld", format="json-ld")
+            
+        except json.JSONDecodeError:
+            print("Error: LLM did not return valid JSON.")
+        
 # --- 7. MAIN UI ---
 st.title("🏦 Risk Data Intelligence Agent")
 
