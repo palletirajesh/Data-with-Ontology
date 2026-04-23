@@ -4,6 +4,7 @@ import json
 from datetime import date
 import streamlit as st
 import pandas as pd
+import re
 import requests
 import rdflib
 from google.cloud import bigquery
@@ -64,6 +65,8 @@ def call_groq_llm(prompt):
         st.error(f"LLM Error: {response.text}")
         return ""
 
+import re # Add this import at the top of your file if not already there
+
 def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
     evaluation_prompt = f"""
     The user asked: "{user_text}"
@@ -72,14 +75,20 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
     
     Did the user fix a table join, column mapping, or business jargon? 
     If YES, extract the new mapping as a valid JSON array of objects (using our bank ontology).
+    ONLY return the JSON array. Do not include explanations, greetings, or markdown backticks.
     If NO, return exactly "MISMATCH".
     """
     response = call_groq_llm(evaluation_prompt) 
     
     if "MISMATCH" not in response:
         try:
-            clean_json_str = response.replace("```json", "").replace("```", "").strip()
-            new_knowledge_json = json.loads(clean_json_str)
+            # 1. Use Regex to safely extract only the JSON part, ignoring LLM conversational text
+            json_match = re.search(r'\[.*\]|\{.*\}', response, re.DOTALL)
+            if not json_match:
+                raise ValueError("No valid JSON found in LLM response.")
+                
+            new_knowledge_json = json.loads(json_match.group(0))
+            
             if isinstance(new_knowledge_json, dict):
                 new_knowledge_json = [new_knowledge_json]
                 
@@ -88,17 +97,31 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
                 item["dateAdded"] = today_str
                 item["reviewStatus"] = "Pending_Review"
             
-            g = rdflib.Graph()
-            g.parse("knowledge_base.jsonld", format="json-ld")
-            new_graph = rdflib.Graph().parse(data=json.dumps(new_knowledge_json), format="json-ld")
-            g += new_graph
-            g.serialize(destination="knowledge_base.jsonld", format="json-ld")
+            # 2. NATIVE JSON HANDLING (Bypasses rdflib strictness)
+            file_path = "knowledge_base_23Ap.jsonld"
+            
+            with open(file_path, "r") as f:
+                kb_data = json.load(f)
+            
+            # Append directly to the @graph array
+            if "@graph" in kb_data:
+                kb_data["@graph"].extend(new_knowledge_json)
+            else:
+                kb_data["@graph"] = new_knowledge_json
+                
+            # Write back to file beautifully formatted
+            with open(file_path, "w") as f:
+                json.dump(kb_data, f, indent=2)
             
             st.success(f"✅ Model successfully retrained! Changes flagged for review on {today_str}.")
+            time.sleep(2) # Pause so the user can actually read the success message
+            
         except json.JSONDecodeError:
             st.warning("Feedback loop skipped: AI did not return strictly valid JSON.")
+            time.sleep(2)
         except Exception as e:
             st.error(f"Error updating ontology: {e}")
+            time.sleep(3)
 
 def build_context_string():
     context = ""
