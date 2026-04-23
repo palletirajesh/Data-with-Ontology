@@ -23,7 +23,9 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# Secrets Management
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+TOGETHER_API_KEY = st.secrets.get("TOGETHER_API_KEY", "") # Failover Key
 BQ_PROJECT = st.secrets["bigquery"]["project_id"]
 BQ_DATASET = st.secrets["bigquery"]["dataset_id"]
 HISTORY_TABLE = f"{BQ_PROJECT}.{BQ_DATASET}.query_history"
@@ -42,45 +44,76 @@ def load_embedder():
 
 embedder = load_embedder()
 
-# --- 3. PERSISTENCE & HELPERS ---
+# --- 3. FAILOVER & LLM ROUTER ---
 
-def load_persistent_history():
-    """Retrieves query history from BigQuery to populate the sidebar and semantic cache."""
-    try:
-        query = f"SELECT user_query, generated_sql FROM `{HISTORY_TABLE}` ORDER BY timestamp DESC LIMIT 20"
-        return bq_client.query(query).to_dataframe()
-    except Exception as e:
-        return pd.DataFrame(columns=["user_query", "generated_sql"])
-
-def save_query_to_db(user_text, sql):
-    """Saves a successfully generated query to the BigQuery history table."""
-    try:
-        rows_to_insert = [{
-            "user_query": user_text,
-            "generated_sql": sql,
-            "timestamp": datetime.now().isoformat()
-        }]
-        bq_client.insert_rows_json(HISTORY_TABLE, rows_to_insert)
-    except Exception as e:
-        st.warning(f"Note: Could not log to BigQuery history: {e}")
-
-def call_groq_llm(prompt):
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = {
+def call_llm_with_fallback(prompt):
+    """Primary: Groq | Fallback: Together AI (Llama-3.3-70B)"""
+    
+    # --- TRY GROQ ---
+    url_groq = "https://api.groq.com/openai/v1/chat/completions"
+    headers_groq = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    payload_groq = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.0
     }
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code == 200:
-        return response.json()["choices"][0]["message"]["content"]
-    else:
-        st.error(f"LLM Error: {response.text}")
+    
+    try:
+        res = requests.post(url_groq, headers=headers_groq, json=payload_groq, timeout=15)
+        if res.status_code == 200:
+            return res.json()["choices"][0]["message"]["content"]
+        elif res.status_code == 429:
+            st.toast("⚠️ Groq Rate Limit. Switching to Fallback Provider...")
+        else:
+            st.warning(f"Groq issue ({res.status_code}). Attempting Fallback...")
+    except Exception:
+        st.toast("📡 Groq Connection Failed. Attempting Fallback...")
+
+    # --- TRY TOGETHER AI (The Demo Safety Net) ---
+    if not TOGETHER_API_KEY:
+        st.error("Fallback Failed: No TOGETHER_API_KEY found in Streamlit Secrets.")
         return ""
 
+    url_tog = "https://api.together.xyz/v1/chat/completions"
+    headers_tog = {"Authorization": f"Bearer {TOGETHER_API_KEY}", "Content-Type": "application/json"}
+    payload_tog = {
+        "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0
+    }
+    
+    try:
+        res_tog = requests.post(url_tog, headers=headers_tog, json=payload_tog, timeout=15)
+        if res_tog.status_code == 200:
+            st.toast("✅ Fallback Successful (Together AI)")
+            return res_tog.json()["choices"][0]["message"]["content"]
+        else:
+            st.error(f"Critical: Both Providers Failed. {res_tog.text}")
+            return ""
+    except Exception as e:
+        st.error(f"Critical System Failure: {e}")
+        return ""
+
+# --- 4. PERSISTENCE & CONTEXT ---
+
+def load_persistent_history():
+    """Load history from BigQuery to populate Sidebar and Semantic Cache."""
+    try:
+        query = f"SELECT user_query, generated_sql FROM `{HISTORY_TABLE}` ORDER BY timestamp DESC LIMIT 25"
+        return bq_client.query(query).to_dataframe()
+    except Exception:
+        return pd.DataFrame(columns=["user_query", "generated_sql"])
+
+def save_query_to_db(user_text, sql):
+    """Save generation to BigQuery history."""
+    try:
+        rows = [{"user_query": user_text, "generated_sql": sql, "timestamp": datetime.now().isoformat()}]
+        bq_client.insert_rows_json(HISTORY_TABLE, rows)
+    except Exception as e:
+        st.warning(f"Note: History log failed: {e}")
+
 def build_context_string():
-    """Loads the FULL schema and ontology files without trimming."""
+    """Reads FULL Schema and Ontology files for maximum accuracy."""
     context = ""
     try:
         with open("database_schema.md", "r") as f:
@@ -93,56 +126,41 @@ def build_context_string():
     return context
 
 def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
-    """Pushes new learned mappings to GitHub main branch."""
-    evaluation_prompt = f"""
-    The user asked: "{user_text}"
-    The AI generated: "{original_sql}"
-    The User corrected to: "{edited_sql}"
-    Did the user fix a table join, column mapping, or business jargon? 
-    If YES, extract the new mapping as a valid JSON array of objects using our bank ontology.
-    Return ONLY the raw JSON array string. NO markdown backticks or text.
-    If NO, return exactly "MISMATCH".
-    """
-    response = call_groq_llm(evaluation_prompt) 
+    """Pushes logic corrections back to GitHub."""
+    prompt = f"User asked '{user_text}'. AI wrote '{original_sql}'. User corrected to '{edited_sql}'. Extract business jargon mapping as a raw JSON array. If nothing new, return 'MISMATCH'."
+    response = call_llm_with_fallback(prompt)
+    
     if "MISMATCH" not in response:
         try:
-            clean_response = response.replace("```json", "").replace("```", "").strip()
-            json_match = re.search(r'\[.*\]', clean_response, re.DOTALL)
-            if not json_match: return
-
-            new_data = json.loads(json_match.group(0))
-            if isinstance(new_data, dict): new_data = [new_data]
+            clean = response.replace("```json", "").replace("```", "").strip()
+            match = re.search(r'\[.*\]', clean, re.DOTALL)
+            if not match: return
             
-            today_str = date.today().isoformat()
-            for item in new_data:
-                item["dateAdded"] = today_str
-                item["reviewStatus"] = "Pending_Review"
+            new_mappings = json.loads(match.group(0))
+            today = date.today().isoformat()
+            for m in new_mappings:
+                m["dateAdded"] = today
+                m["reviewStatus"] = "Pending_Review"
             
+            # GitHub Push
             repo = Github(st.secrets["github"]["token"]).get_repo("palletirajesh/Data-with-Ontology")
             contents = repo.get_contents("knowledge_base.jsonld", ref="main")
-            kb_data = json.loads(contents.decoded_content.decode("utf-8"))
+            kb = json.loads(contents.decoded_content.decode("utf-8"))
+            kb.setdefault("@graph", []).extend(new_mappings)
             
-            kb_data.setdefault("@graph", []).extend(new_data)
-            
-            repo.update_file(
-                contents.path,
-                f"🤖 AI Retrain: {user_text[:30]}...",
-                json.dumps(kb_data, indent=2),
-                contents.sha,
-                branch="main"
-            )
-            st.success("✅ Knowledge successfully pushed to GitHub!")
+            repo.update_file(contents.path, f"🤖 AI Retrain: {user_text[:20]}", json.dumps(kb, indent=2), contents.sha, branch="main")
+            st.success("✅ Knowledge pushed to GitHub!")
             time.sleep(2)
         except Exception as e:
-            st.error(f"GitHub Sync Failed: {e}")
+            st.error(f"GitHub Update Failed: {e}")
 
-# --- 4. SIDEBAR & STATE ---
+# --- 5. UI & SIDEBAR ---
+
 if "db_history" not in st.session_state:
     st.session_state.db_history = load_persistent_history()
 
 with st.sidebar:
     st.header("🕒 Query History")
-    st.caption("Last 20 Persistent Queries")
     if st.button("🔄 Refresh History"):
         st.session_state.db_history = load_persistent_history()
     
@@ -153,9 +171,10 @@ with st.sidebar:
             st.session_state.original_generated_sql = row['generated_sql']
             st.rerun()
 
-# --- 5. MAIN APP UI ---
+# --- 6. MAIN WORKFLOW ---
+
 st.title("🏦 Risk Data Agent")
-user_input = st.text_input("What risk data do you need?", key="main_input", placeholder="e.g., Amazon customers with late payments...")
+user_input = st.text_input("What data do you need?", placeholder="e.g. Amazon customers with late payments...", key="main_input")
 
 if user_input:
     col_sql, col_res = st.columns([1, 1.5])
@@ -163,26 +182,25 @@ if user_input:
     with col_sql:
         st.subheader("⚙️ Generated Logic")
         
-        # Determine if we need to generate new SQL or use Cache
         if "last_user_input" not in st.session_state or st.session_state.last_user_input != user_input:
             
             # Semantic Cache Check
             cached_sql = None
             if not st.session_state.db_history.empty:
-                embeddings_past = embedder.encode(st.session_state.db_history['user_query'].tolist(), convert_to_tensor=True)
-                embedding_curr = embedder.encode(user_input, convert_to_tensor=True)
-                scores = util.cos_sim(embedding_curr, embeddings_past)[0]
-                best_idx = scores.argmax().item()
-                if scores[best_idx] > 0.94:
-                    cached_sql = st.session_state.db_history.iloc[best_idx]['generated_sql']
+                curr_emb = embedder.encode(user_input, convert_to_tensor=True)
+                past_embs = embedder.encode(st.session_state.db_history['user_query'].tolist(), convert_to_tensor=True)
+                scores = util.cos_sim(curr_emb, past_embs)[0]
+                if scores.max() > 0.94:
+                    cached_sql = st.session_state.db_history.iloc[scores.argmax().item()]['generated_sql']
 
             if cached_sql:
-                st.toast("⚡ Semantic Match Found! Bypassing Groq.")
+                st.toast("⚡ Semantic Match Found! (BQ Cache)")
                 final_sql = cached_sql
             else:
-                with st.spinner("Translating intent via Llama-3..."):
+                with st.spinner("Synthesizing Logic (Failover Active)..."):
                     context = build_context_string()
                     full_path = f"{BQ_PROJECT}.{BQ_DATASET}"
+                    # THE 19 RULES PROMPT
                     system_prompt = (
                         "You are a BigQuery SQL Expert.\n\nContext:\n" + context + "\n\n"
                         "STRICT RULES:\n"
@@ -197,47 +215,44 @@ if user_input:
                         "10. If missing, output: 'I cannot answer this with available data.'\n"
                         "11. dim_customer is the bridge table.\n"
                         f"12. Prefix tables with: `{full_path}.`\n"
-                        "15. For string type filters, use: UPPER(column) = UPPER('value').\n"
+                        "15. For filters, use: UPPER(column) = UPPER('value').\n"
                         "16. Apply BUSINESS TRANSLATION RULES strictly.\n"
                         "17. Any column in WHERE/HAVING must be in SELECT.\n"
-                        "18. Return detailed records unless summary keywords (count, total) are used.\n"
+                        "18. Return detailed records unless summary keywords are used.\n"
                         "19. Assign short aliases (t1, t2) and prefix EVERY column.\n\n"
                         f"Write BigQuery SQL for: \"{user_input}\""
                     )
-                    final_sql = call_groq_llm(system_prompt).replace("```sql", "").replace("```", "").strip()
+                    final_sql = call_llm_with_fallback(system_prompt).replace("```sql", "").replace("```", "").strip()
                     save_query_to_db(user_input, final_sql)
             
+            # Sync session state
             st.session_state.last_user_input = user_input
             st.session_state.original_generated_sql = final_sql
             st.session_state.sql_editor_key = final_sql
             st.session_state.pending_feedback = False
 
-        # SQL Editor Form
-        with st.form("sql_editor_form"):
-            user_edited_sql = st.text_area("Review/Edit SQL:", value=st.session_state.get('sql_editor_key', ''), height=250)
-            execute_btn = st.form_submit_button("▶️ Execute Query")
-            
-        if execute_btn:
-            with st.status("🚀 Running BigQuery Job...", expanded=True) as status:
+        # SQL Editor
+        with st.form("editor_form"):
+            user_sql = st.text_area("SQL Editor:", value=st.session_state.get('sql_editor_key', ''), height=250)
+            if st.form_submit_button("▶️ Execute Query"):
                 try:
-                    job = bq_client.query(user_edited_sql)
-                    df = job.result(timeout=30).to_dataframe(create_bqstorage_client=False)
-                    st.session_state.last_df = df
-                    status.update(label="✅ Query Finished", state="complete", expanded=False)
-                    if user_edited_sql.strip() != st.session_state.original_generated_sql.strip():
+                    job = bq_client.query(user_sql)
+                    st.session_state.last_df = job.result(timeout=30).to_dataframe(create_bqstorage_client=False)
+                    if user_sql.strip() != st.session_state.original_generated_sql.strip():
                         st.session_state.pending_feedback = True
+                        st.session_state.edited_sql_for_feedback = user_sql
                 except Exception as e:
-                    status.update(label="❌ Query Error", state="error")
-                    st.error(e)
+                    st.error(f"BQ Error: {e}")
 
     with col_res:
-        st.subheader("📊 Data Results")
-        if st.session_state.get("pending_feedback", False):
-            st.info("💡 **Modified query detected. Retrain the model?**")
+        st.subheader("📊 Results")
+        
+        if st.session_state.get("pending_feedback"):
+            st.info("💡 **Retrain model with your SQL edits?**")
             b1, b2, _ = st.columns([1.5, 1.5, 4])
             with b1:
                 if st.button("🧠 Yes", use_container_width=True):
-                    evaluate_and_update_ontology(user_input, st.session_state.original_generated_sql, user_edited_sql)
+                    evaluate_and_update_ontology(user_input, st.session_state.original_generated_sql, st.session_state.edited_sql_for_feedback)
                     st.session_state.pending_feedback = False
                     st.rerun()
             with b2:
