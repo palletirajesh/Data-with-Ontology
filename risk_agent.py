@@ -85,10 +85,10 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
             st.toast(f"🔄 Learned new mapping. Flagged for review on {today_str}.")
             
             g = rdflib.Graph()
-            g.parse("knowledge_base_23Ap.jsonld", format="json-ld")
+            g.parse("knowledge_base.jsonld", format="json-ld")
             new_graph = rdflib.Graph().parse(data=json.dumps(new_knowledge_json), format="json-ld")
             g += new_graph
-            g.serialize(destination="knowledge_base_23Ap.jsonld", format="json-ld")
+            g.serialize(destination="knowledge_base.jsonld", format="json-ld")
             
         except json.JSONDecodeError:
             st.warning("Feedback loop skipped: AI did not return strictly valid JSON.")
@@ -101,14 +101,14 @@ def build_context_string():
     context = ""
     # 1. Load Markdown Schema
     try:
-        with open("database_schema_23ap.md", "r") as f:
+        with open("database_schema.md", "r") as f:
             context += f"--- DATABASE SCHEMA ---\n{f.read()}\n\n"
     except Exception as e:
         st.warning(f"Could not load schema: {e}")
 
     # 2. Load JSON-LD Ontology
     try:
-        with open("knowledge_base_23Ap.jsonld", "r") as f:
+        with open("knowledge_base.jsonld", "r") as f:
             context += f"--- ONTOLOGY & JARGON MAPPING ---\n{f.read()}\n"
     except Exception as e:
         st.warning(f"Could not load ontology: {e}")
