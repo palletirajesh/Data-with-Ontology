@@ -8,3 +8,4 @@ sentence-transformers
 pyarrow
 db-dtypes
 owlrl
+PyGithub
