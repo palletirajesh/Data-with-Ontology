@@ -121,7 +121,7 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
             # GitHub Config
             token = st.secrets["github"]["token"]
             repo_path = "palletirajesh/Data-with-Ontology"
-            file_name = "knowledge_base_23Ap.jsonld" 
+            file_name = "knowledge_base.jsonld" 
             
             g = Github(token)
             repo = g.get_repo(repo_path)
