@@ -10,6 +10,7 @@ from github import Github
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from sentence_transformers import SentenceTransformer, util
+from github import Auth
 
 # --- 1. CONFIG & STYLE ---
 st.set_page_config(page_title="Risk Data Agent", page_icon="🏦", layout="wide")
@@ -151,33 +152,65 @@ def build_context_string():
 
 
 def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
-    """Pushes logic corrections back to GitHub."""
-    prompt = f"User asked '{user_text}'. AI wrote '{original_sql}'. User corrected to '{edited_sql}'. Extract business jargon mapping as a raw JSON array. If nothing new, return 'MISMATCH'."
-    response = call_llm_with_fallback(prompt)
+    """Modernized GitHub Push with Auth.Token and Robust JSON Parsing."""
+    evaluation_prompt = f"""
+    User asked: "{user_text}"
+    AI wrote: "{original_sql}"
+    User corrected to: "{edited_sql}"
+    
+    If the user's edit defines a new business term, table join, or column mapping, 
+    extract it as a valid JSON-LD @graph array.
+    Return ONLY the JSON. No preamble, no markdown. 
+    If no new jargon found, return "MISMATCH".
+    """
+    
+    response = call_llm_with_fallback(evaluation_prompt)
     
     if "MISMATCH" not in response:
         try:
-            clean = response.replace("```json", "").replace("```", "").strip()
-            match = re.search(r'\[.*\]', clean, re.DOTALL)
-            if not match: return
+            # 1. CLEANING: Remove markdown backticks if the LLM added them
+            clean_res = response.replace("```json", "").replace("```", "").strip()
             
-            new_mappings = json.loads(match.group(0))
+            # 2. PARSING: Find the array part
+            json_start = clean_res.find("[")
+            json_end = clean_res.rfind("]") + 1
+            if json_start == -1 or json_end == 0:
+                st.error("AI returned invalid JSON format.")
+                return
+
+            new_mappings = json.loads(clean_res[json_start:json_end])
+            
+            # 3. METADATA: Add the tracking info
             today = date.today().isoformat()
-            for m in new_mappings:
-                m["dateAdded"] = today
-                m["reviewStatus"] = "Pending_Review"
+            for item in new_mappings:
+                item["dateAdded"] = today
+                item["reviewStatus"] = "Pending_Review"
+
+            # 4. MODERN GITHUB AUTH: (Fixes the warning in your logs)
+            auth = Auth.Token(st.secrets["github"]["token"])
+            g = Github(auth=auth)
+            repo = g.get_repo(st.secrets["github"]["repo"])
             
-            # GitHub Push
-            repo = Github(st.secrets["github"]["token"]).get_repo("palletirajesh/Data-with-Ontology")
-            contents = repo.get_contents("knowledge_base.jsonld", ref="main")
-            kb = json.loads(contents.decoded_content.decode("utf-8"))
-            kb.setdefault("@graph", []).extend(new_mappings)
+            # 5. FETCH & UPDATE
+            file_path = "knowledge_base.jsonld"
+            contents = repo.get_contents(file_path, ref="main")
+            current_kb = json.loads(contents.decoded_content.decode("utf-8"))
             
-            repo.update_file(contents.path, f"🤖 AI Retrain: {user_text[:20]}", json.dumps(kb, indent=2), contents.sha, branch="main")
-            st.success("✅ Knowledge pushed to GitHub!")
-            time.sleep(2)
+            # Append and push
+            current_kb.setdefault("@graph", []).extend(new_mappings)
+            
+            repo.update_file(
+                path=contents.path,
+                message=f"🤖 Knowledge Loop: {user_text[:30]}",
+                content=json.dumps(current_kb, indent=2),
+                sha=contents.sha,
+                branch="main"
+            )
+            st.success("✅ GitHub Knowledge Base Updated!")
+            time.sleep(1) # Small delay to allow GitHub to sync
+            
         except Exception as e:
-            st.error(f"GitHub Update Failed: {e}")
+            st.error(f"❌ GitHub Update Error: {e}")
 
 # --- 5. UI & SIDEBAR ---
 
