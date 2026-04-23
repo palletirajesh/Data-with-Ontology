@@ -4,13 +4,31 @@
     "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
     "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
     "owl": "http://www.w3.org/2002/07/owl#",
-    "hasColumn": { "@id": "bank:hasColumn", "@type": "@id" },
-    "joinsWith": { "@id": "bank:joinsWith" },
-    "targetTable": { "@id": "bank:targetTable", "@type": "@id" },
-    "sourceKey": { "@id": "bank:sourceKey" },
-    "targetKey": { "@id": "bank:targetKey" },
-    "representsConcept": { "@id": "bank:representsConcept", "@type": "@id" },
-    "businessJargon": { "@id": "bank:businessJargon", "@container": "@set" }
+    "hasColumn": {
+      "@id": "bank:hasColumn",
+      "@type": "@id"
+    },
+    "joinsWith": {
+      "@id": "bank:joinsWith"
+    },
+    "targetTable": {
+      "@id": "bank:targetTable",
+      "@type": "@id"
+    },
+    "sourceKey": {
+      "@id": "bank:sourceKey"
+    },
+    "targetKey": {
+      "@id": "bank:targetKey"
+    },
+    "representsConcept": {
+      "@id": "bank:representsConcept",
+      "@type": "@id"
+    },
+    "businessJargon": {
+      "@id": "bank:businessJargon",
+      "@container": "@set"
+    }
   },
   "@graph": [
     {
@@ -24,7 +42,7 @@
           "sourceKey": "card_id",
           "targetKey": "card_id"
         },
-		{
+        {
           "@type": "bank:JoinDefinition",
           "targetTable": "bank:dim_card_association",
           "sourceKey": "card_id",
@@ -80,7 +98,7 @@
           "sourceKey": "card_id",
           "targetKey": "card_id"
         },
-		{
+        {
           "@type": "bank:JoinDefinition",
           "targetTable": "bank:fact_card_ledger",
           "sourceKey": "card_id",
@@ -154,8 +172,18 @@
     {
       "@id": "bank:Concept_PaymentDelay",
       "@type": "owl:Class",
-      "businessJargon": ["payment delay", "late payments", "overdue"]
+      "businessJargon": [
+        "payment delay",
+        "late payments",
+        "overdue"
+      ]
+    },
+    {
+      "term": "FICO Score Threshold",
+      "original_mapping": "t3.fico_score > 700",
+      "correct_mapping": "t3.fico_score < 650",
+      "dateAdded": "2026-04-23",
+      "reviewStatus": "Pending_Review"
     }
-    
   ]
 }
