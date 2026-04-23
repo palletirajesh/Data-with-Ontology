@@ -114,14 +114,14 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
                 json.dump(kb_data, f, indent=2)
             
             st.success(f"✅ Model successfully retrained! Changes flagged for review on {today_str}.")
-            time.sleep(2) # Pause so the user can actually read the success message
+            time.sleep(10) # Pause so the user can actually read the success message
             
         except json.JSONDecodeError:
             st.warning("Feedback loop skipped: AI did not return strictly valid JSON.")
-            time.sleep(2)
+            time.sleep(10)
         except Exception as e:
             st.error(f"Error updating ontology: {e}")
-            time.sleep(3)
+            time.sleep(10)
 
 def build_context_string():
     context = ""
