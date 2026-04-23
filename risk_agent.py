@@ -100,7 +100,7 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
             
             # --- THE GITHUB FIX ---
             # Make sure this matches the EXACT name of the file in your GitHub repo
-            file_path = "knowledge_base_23Ap_updated_v1.jsonld" 
+            file_path = "knowledge_base.jsonld" 
             
             # Connect to GitHub
             g = Github(st.secrets["github"]["token"])
