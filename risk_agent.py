@@ -93,122 +93,93 @@ def build_context_string():
 
 def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
     """
-    Analyzes SQL corrections to update the JSON-LD Graph.
-    Follows: Column -> bank:representsConcept -> bank:Concept -> bank:businessJargon
+    Advanced Logic: Updates Graph nodes based on specific Banking Ontology rules.
+    Links bank:Column -> bank:representsConcept -> bank:Concept -> bank:businessJargon
     """
-    # Load current ontology to teach the LLM the current relationships
     try:
         with open("knowledge_base.jsonld", "r") as f:
-            ontology_data = f.read()
+            ontology_context = f.read()
     except:
-        ontology_data = "Ontology file missing."
+        ontology_context = "Ontology file missing."
 
     prompt = f"""
-    You are an Ontology Engineer for a Banking Data Warehouse.
+    You are an Ontology Engineer for a Banking Risk Data Warehouse.
     
-    CONTEXT ONTOLOGY (JSON-LD):
-    {ontology_data[:3000]} 
+    CONTEXT ONTOLOGY:
+    {ontology_context[:3000]}
 
-    USER INTERACTION:
-    Question: "{user_text}"
-    AI Original SQL: {original_sql}
-    User Corrected SQL: {edited_sql}
+    USER INPUT: "{user_text}"
+    AI SQL: {original_sql}
+    USER CORRECTED SQL: {edited_sql}
 
-    TASK:
-    Analyze the user's SQL correction. Your goal is to update the JSON-LD Knowledge Graph.
+    TASK: Analyze why the user corrected the SQL. Update the JSON-LD '@graph'.
     
-    SCENARIOS:
-    1. If the user corrected a Column choice: Find the Concept linked to that column. Add any new terms from the question to that Concept's "bank:businessJargon" array.
-    2. If a new logic was introduced: Create a new "bank:Concept" and link the relevant "bank:Column" to it using "bank:representsConcept".
-    3. If the correction was just formatting: Return "MISMATCH".
+    STRICT ONTOLOGY RULES:
+    1. If the user fixed a filter (e.g., changed column name or value): 
+       - Find the Concept that represents that business term.
+       - Add the user's specific wording to that Concept's "bank:businessJargon" set.
+    2. If the user introduced a new logical Concept:
+       - Create a new node with "@type": "bank:Concept".
+       - Create a node for the "@type": "bank:Column" used.
+       - Link them using "bank:representsConcept".
+    3. Use the "bank:" prefix for all new @ids.
+    4. If the edit is trivial (whitespace), return: MISMATCH.
 
-    OUTPUT:
-    Return a JSON array of NEW or UPDATED nodes for the "@graph". 
-    Use the "bank:" prefix for @ids.
-    Example: 
-    [
-      {{
-        "@id": "bank:Concept_Debt",
-        "@type": "bank:Concept",
-        "bank:businessJargon": ["used amount", "current balance", "debt"]
-      }}
-    ]
-
-    Return ONLY the raw JSON array. No preamble.
+    Output ONLY the JSON array of the specific nodes to be added/updated in the graph.
     """
     
     response = call_llm_with_fallback(prompt)
-    
-    if not response or response.strip().upper() == "MISMATCH":
-        return {"status": "warning", "msg": "Ontology Update Skipped: No new business logic detected."}
+    if not response or "MISMATCH" in response.upper():
+        return {"status": "warning", "msg": "Retrain Skipped: No business logic change detected."}
 
     try:
-        # Clean response and parse JSON
         clean = response.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\[.*\]', clean, re.DOTALL)
-        if not match: return {"status": "error", "msg": "AI failed to generate structural JSON."}
+        if not match: return {"status": "error", "msg": "AI failed to generate valid graph nodes."}
         
         new_nodes = json.loads(match.group(0))
 
-        # GitHub Connection
+        # GitHub Sync
         auth = Auth.Token(st.secrets["github"]["token"])
         g = Github(auth=auth)
         repo = g.get_repo(st.secrets["github"]["repo"])
-        
-        # Load Existing File from Git
         contents = repo.get_contents("knowledge_base.jsonld", ref="main")
         kb = json.loads(contents.decoded_content.decode("utf-8"))
         graph = kb.get("@graph", [])
 
-        # MERGE LOGIC: Update existing nodes or append new ones
-        updated_count = 0
+        # Merge new nodes into existing graph
         for new_node in new_nodes:
             new_node["dateAdded"] = date.today().isoformat()
             new_node["reviewStatus"] = "Pending_Review"
             
-            # Check if node already exists in graph to merge businessJargon
+            # Check for existing @id to merge jargon instead of duplicating
             found = False
-            for existing_node in graph:
-                if existing_node.get("@id") == new_node.get("@id"):
-                    # Merge jargon sets to avoid duplicates
-                    if "bank:businessJargon" in new_node and "bank:businessJargon" in existing_node:
-                        combined = list(set(existing_node["bank:businessJargon"]) | set(new_node["bank:businessJargon"]))
-                        existing_node["bank:businessJargon"] = combined
-                    # Update other fields
-                    existing_node.update({k: v for k, v in new_node.items() if k != "bank:businessJargon"})
-                    found = True
-                    updated_count += 1
-                    break
-            
-            if not found:
-                graph.append(new_node)
-                updated_count += 1
+            for existing in graph:
+                if existing.get("@id") == new_node.get("@id"):
+                    if "bank:businessJargon" in new_node and "bank:businessJargon" in existing:
+                        existing["bank:businessJargon"] = list(set(existing["bank:businessJargon"]) | set(new_node["bank:businessJargon"]))
+                    existing.update({k: v for k, v in new_node.items() if k != "bank:businessJargon"})
+                    found = True; break
+            if not found: graph.append(new_node)
 
         kb["@graph"] = graph
-        
-        # Push to GitHub
-        repo.update_file(
-            path=contents.path,
-            message=f"🧠 Ontology Sync: {user_text[:20]}",
-            content=json.dumps(kb, indent=2),
-            sha=contents.sha,
-            branch="main"
-        )
-        return {"status": "success", "msg": f"Ontology Updated: {updated_count} nodes synchronized."}
-        
+        repo.update_file(contents.path, f"🧠 Ontology Retrain: {user_text[:20]}", json.dumps(kb, indent=2), contents.sha, branch="main")
+        return {"status": "success", "msg": "GitHub Knowledge Base Updated Successfully!"}
     except Exception as e:
-        return {"status": "error", "msg": f"Ontology Sync Failed: {e}"}
+        return {"status": "error", "msg": f"GitHub Error: {e}"}
 
-# --- 5. UI & SIDEBAR ---
+# --- 5. SIDEBAR ---
 if "db_history" not in st.session_state:
     st.session_state.db_history = load_persistent_history()
 
 with st.sidebar:
-    st.header("🕒 History")
+    st.header("🕒 Query History")
     if st.button("🔄 Sync with BigQuery", width='stretch'):
         st.session_state.db_history = load_persistent_history()
     
+    st.markdown("---")
     for idx, row in st.session_state.db_history.iterrows():
+        # Clicking restores full text and SQL to UI
         if st.button(row['user_query'], key=f"h_{idx}", width='stretch'):
             st.session_state.main_input = row['user_query']
             st.session_state.sql_editor_key = row['generated_sql']
@@ -219,7 +190,6 @@ with st.sidebar:
 # --- 6. MAIN WORKFLOW ---
 st.title("🏦 Risk Data Agent")
 
-# Persist feedback result across rerun
 if "retrain_result" in st.session_state:
     res = st.session_state.retrain_result
     if res["status"] == "success": st.success(res["msg"])
@@ -234,6 +204,8 @@ if user_input:
     col_sql, col_res = st.columns([1, 1.5])
     
     with col_sql:
+        st.subheader("⚙️ Generated Logic")
+        
         if "last_user_input" not in st.session_state or st.session_state.last_user_input != user_input:
             # Semantic Cache
             cached_sql = None
@@ -242,18 +214,34 @@ if user_input:
                 if scores.max() > 0.94: cached_sql = st.session_state.db_history.iloc[scores.argmax().item()]['generated_sql']
 
             if cached_sql:
-                st.toast("⚡ Using Cached Logic")
+                st.toast("⚡ Reusing Logic from Cache")
                 final_sql = cached_sql
             else:
-                with st.spinner("Synthesizing SQL..."):
+                with st.spinner("Synthesizing SQL (19-Rule Mode)..."):
                     context = build_context_string()
                     full_path = f"{BQ_PROJECT}.{BQ_DATASET}"
-                    # THE 19 RULES
+                    
+                    # --- RESTORED FULL 19 RULES PROMPT ---
                     system_prompt = (
                         "You are a BigQuery SQL Expert.\n\nContext:\n" + context + "\n\n"
-                        "STRICT RULES:\n1. Use Context only. 2. No SELECT *. 3. Always select: cust_id, customer_name, card_id.\n"
-                        "4. Join tables as needed. 5. Prefix: " + full_path + ". 6. Use aliases.\n"
-                        "7. RAW SQL ONLY. No explanations.\n\nTask: " + user_input
+                        "STRICT RULES:\n"
+                        "1. ONLY use Tables/Columns in Context.\n"
+                        "2. NEVER USE 'SELECT *'. Explicitly name columns.\n"
+                        "3. DEFAULT COLUMNS: Always select: `cust_id`, `customer_name`, `card_id`.\n"
+                        "4. DYNAMIC COLUMNS: Select columns relating to user conditions.\n"
+                        "5. PROACTIVE JOINS: Write JOINs for required tables.\n"
+                        "7. NO PARENTHESES: Never put () after table names.\n"
+                        "8. Use MANDATORY JOINs exactly.\n"
+                        "9. Output ONLY raw SQL code.\n"
+                        "10. If missing, output: 'I cannot answer this with available data.'\n"
+                        "11. dim_customer is the bridge table.\n"
+                        f"12. Prefix tables with: `{full_path}.`\n"
+                        "15. For filters, use: UPPER(column) = UPPER('value').\n"
+                        "16. Apply BUSINESS TRANSLATION RULES strictly.\n"
+                        "17. Any column in WHERE/HAVING must be in SELECT.\n"
+                        "18. Return detailed records unless summary keywords are used.\n"
+                        "19. Assign short aliases (t1, t2) and prefix EVERY column.\n\n"
+                        f"Write BigQuery SQL for: \"{user_input}\""
                     )
                     final_sql = call_llm_with_fallback(system_prompt).replace("```sql", "").replace("```", "").strip()
                     save_query_to_db(user_input, final_sql)
@@ -265,7 +253,7 @@ if user_input:
 
         with st.form("sql_form"):
             user_sql = st.text_area("SQL Preview:", value=st.session_state.get('sql_editor_key', ''), height=250)
-            if st.form_submit_button("▶️ Execute"):
+            if st.form_submit_button("▶️ Execute Query"):
                 try:
                     job = bq_client.query(user_sql)
                     st.session_state.last_df = job.result(timeout=30).to_dataframe(create_bqstorage_client=False)
@@ -275,6 +263,7 @@ if user_input:
                 except Exception as e: st.error(f"BQ Error: {e}")
 
     with col_res:
+        st.subheader("📊 Results")
         if st.session_state.get("pending_feedback"):
             st.info("💡 **Retrain model with your SQL edits?**")
             b1, b2, _ = st.columns([1.5, 1.5, 4])
@@ -287,7 +276,7 @@ if user_input:
                     st.session_state.pending_feedback = False
                     st.rerun()
             with b2:
-                if st.button("❌ No, Ignore", width='stretch'):
+                if st.button("❌ No", width='stretch'):
                     st.session_state.pending_feedback = False
                     st.rerun()
 
