@@ -2,14 +2,19 @@ import os
 import time
 import json
 import re
+import logging
 from datetime import datetime, date
 import streamlit as st
 import pandas as pd
 import requests
-from github import Github, Auth  # Modern GitHub Auth for v10+
+from github import Github, Auth  # Modern GitHub Auth
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from sentence_transformers import SentenceTransformer, util
+
+# --- 0. SUPPRESS LOG NOISE ---
+# Suppresses the torchvision/transformers warnings found in your logs
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 # --- 1. CONFIG & STYLE ---
 st.set_page_config(page_title="Risk Data Agent", page_icon="🏦", layout="wide")
@@ -25,7 +30,7 @@ st.markdown("""
 
 # Secrets Management
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-TOGETHER_API_KEY = st.secrets.get("TOGETHER_API_KEY1", "") # Using the correct key from your secrets
+TOGETHER_API_KEY = st.secrets.get("TOGETHER_API_KEY1", "") 
 BQ_PROJECT = st.secrets["bigquery"]["project_id"]
 BQ_DATASET = st.secrets["bigquery"]["dataset_id"]
 HISTORY_TABLE = f"{BQ_PROJECT}.{BQ_DATASET}.query_history"
@@ -65,7 +70,6 @@ def call_llm_with_fallback(prompt):
     except Exception:
         st.toast("📡 Groq Connection Failed. Attempting Fallback...")
 
-    # --- FALLBACK TO TOGETHER AI ---
     if not TOGETHER_API_KEY:
         st.error("Fallback Failed: TOGETHER_API_KEY1 missing in Secrets.")
         return ""
@@ -90,7 +94,6 @@ def call_llm_with_fallback(prompt):
 # --- 4. PERSISTENCE & GITHUB UPDATES ---
 
 def load_persistent_history():
-    """Fetch query history from BigQuery."""
     try:
         query = f"SELECT user_query, generated_sql FROM `{HISTORY_TABLE}` ORDER BY timestamp DESC LIMIT 25"
         return bq_client.query(query).to_dataframe()
@@ -98,7 +101,6 @@ def load_persistent_history():
         return pd.DataFrame(columns=["user_query", "generated_sql"])
 
 def save_query_to_db(user_text, sql):
-    """Saves to BigQuery with explicit error reporting."""
     try:
         rows_to_insert = [{
             "user_query": user_text,
@@ -107,22 +109,20 @@ def save_query_to_db(user_text, sql):
         }]
         errors = bq_client.insert_rows_json(HISTORY_TABLE, rows_to_insert)
         if errors:
-            st.error(f"BQ Save Error (Column mismatch?): {errors}")
+            st.error(f"BQ Save Error: {errors}")
         else:
             st.toast("✅ Saved to History")
     except Exception as e:
         st.error(f"Save Failed: {e}")
 
 def build_context_string():
-    """Reads FULL Schema and Ontology files for maximum AI accuracy."""
+    """Reads FULL Schema and Ontology files."""
     context = ""
-    # RESTORED FILENAME: database_schema.md
     try:
         with open("database_schema.md", "r") as f:
             context += f"--- DATABASE SCHEMA ---\n{f.read()}\n\n"
     except: pass
     
-    # FILENAME: knowledge_base.jsonld
     try:
         with open("knowledge_base.jsonld", "r") as f:
             context += f"--- ONTOLOGY ---\n{f.read()}\n"
@@ -130,22 +130,30 @@ def build_context_string():
     return context
 
 def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
-    """Pushes logic corrections back to GitHub (knowledge_base.jsonld)."""
-    with st.spinner("Analyzing edits for retraining..."):
-        prompt = f"User asked '{user_text}'. AI wrote '{original_sql}'. User corrected to '{edited_sql}'. Extract business jargon mapping as a raw JSON array. If nothing new, return 'MISMATCH'."
-        response = call_llm_with_fallback(prompt)
+    """Pushes knowledge updates to GitHub."""
+    # Precision Prompt Fix: Improved extraction logic
+    prompt = f"""You are a SQL knowledge extractor. Compare these two queries and extract what changed.
+    User Question: "{user_text}"
+    Original AI SQL: {original_sql}
+    User-Corrected SQL: {edited_sql}
+    Extract ALL differences as a JSON array. Each item should have:
+    - "term": the business term or concept from the user question
+    - "original_mapping": what the AI incorrectly used
+    - "correct_mapping": what the user corrected it to
+    - "correction_type": one of ["table_name", "column_name", "filter_value", "join_logic", "business_rule"]
+    If the SQLs are identical or only differ in whitespace, return exactly: MISMATCH
+    Return ONLY the JSON array or MISMATCH. No explanation."""
+    
+    response = call_llm_with_fallback(prompt)
     
     if "MISMATCH" in response:
-        st.warning("Retrain Skipped: AI found no new business logic in your edits.")
+        st.warning("Retrain Skipped: AI found no logic differences.")
         return
 
     try:
-        # Robust JSON cleaning
         clean = response.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\[.*\]', clean, re.DOTALL)
-        if not match: 
-            st.error("AI returned invalid mapping format. Check logs.")
-            return
+        if not match: return
         
         new_mappings = json.loads(match.group(0))
         today = date.today().isoformat()
@@ -153,11 +161,9 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
             m["dateAdded"] = today
             m["reviewStatus"] = "Pending_Review"
         
-        # Modern GitHub Auth (Fixes DeprecationWarning in logs)
         auth = Auth.Token(st.secrets["github"]["token"])
         g = Github(auth=auth)
-        repo_name = st.secrets["github"]["repo"]
-        repo = g.get_repo(repo_name)
+        repo = g.get_repo(st.secrets["github"]["repo"])
         
         file_path = "knowledge_base.jsonld"
         contents = repo.get_contents(file_path, ref="main")
@@ -172,9 +178,8 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
             branch="main"
         )
         st.success(f"✅ GitHub Updated: {len(new_mappings)} new rules added!")
-        time.sleep(1)
     except Exception as e:
-        st.error(f"❌ GitHub Sync Failed: {e}")
+        st.error(f"❌ GitHub Push Failed: {e}")
 
 # --- 5. UI & SIDEBAR SYNC ---
 if "db_history" not in st.session_state:
@@ -182,13 +187,12 @@ if "db_history" not in st.session_state:
 
 with st.sidebar:
     st.header("🕒 Query History")
-    if st.button("🔄 Sync with BigQuery"):
+    if st.button("🔄 Sync with BQ", width='stretch'): # Updated to width='stretch'
         st.session_state.db_history = load_persistent_history()
     
     st.markdown("---")
     for idx, row in st.session_state.db_history.iterrows():
-        # ON CLICK: Restore the full UI state
-        if st.button(row['user_query'], key=f"h_{idx}", use_container_width=True):
+        if st.button(row['user_query'], key=f"h_{idx}", width='stretch'):
             st.session_state.main_input = row['user_query']
             st.session_state.sql_editor_key = row['generated_sql']
             st.session_state.last_user_input = row['user_query']
@@ -197,16 +201,17 @@ with st.sidebar:
 
 # --- 6. MAIN WORKFLOW ---
 st.title("🏦 Risk Data Agent")
-# Linked to 'main_input' for sidebar sync
 user_input = st.text_input("What risk data do you need?", key="main_input", placeholder="e.g. Amazon customers with late payments...")
 
+# Preserve input for across rerun
 if user_input:
+    st.session_state["last_user_input_preserved"] = user_input
+    
     col_sql, col_res = st.columns([1, 1.5])
     
     with col_sql:
         st.subheader("⚙️ Generated Logic")
         
-        # Check if we need to call the AI OR load from memory
         if "last_user_input" not in st.session_state or st.session_state.last_user_input != user_input:
             
             # Semantic Cache Check
@@ -225,7 +230,7 @@ if user_input:
                 with st.spinner("Synthesizing Logic..."):
                     context = build_context_string()
                     full_path = f"{BQ_PROJECT}.{BQ_DATASET}"
-                    # FULL 19 RULES RESTORED
+                    # FULL 19 RULES
                     system_prompt = (
                         "You are a BigQuery SQL Expert.\n\nContext:\n" + context + "\n\n"
                         "STRICT RULES:\n"
@@ -255,14 +260,13 @@ if user_input:
             st.session_state.sql_editor_key = final_sql
             st.session_state.pending_feedback = False
 
-        # SQL Editor Form
         with st.form("editor_form"):
+            # Fixed: Editor now correctly tracks edits
             user_sql = st.text_area("SQL Preview:", value=st.session_state.get('sql_editor_key', ''), height=250)
             if st.form_submit_button("▶️ Execute Query"):
                 try:
                     job = bq_client.query(user_sql)
                     st.session_state.last_df = job.result(timeout=30).to_dataframe(create_bqstorage_client=False)
-                    # Trigger retraining prompt if user edited the SQL
                     if user_sql.strip() != st.session_state.original_generated_sql.strip():
                         st.session_state.pending_feedback = True
                         st.session_state.edited_sql_for_feedback = user_sql
@@ -275,12 +279,17 @@ if user_input:
             st.info("💡 **Modified query detected. Retrain the model?**")
             b1, b2, _ = st.columns([1.5, 1.5, 4])
             with b1:
-                if st.button("🧠 Yes, update ontology", use_container_width=True):
-                    evaluate_and_update_ontology(user_input, st.session_state.original_generated_sql, st.session_state.edited_sql_for_feedback)
+                # Fixed: Rerun moved outside the function call
+                if st.button("🧠 Yes, Retrain", width='stretch'):
+                    _user_text = st.session_state.get("last_user_input_preserved", "")
+                    _orig_sql  = st.session_state.original_generated_sql
+                    _edit_sql  = st.session_state.edited_sql_for_feedback
+                    
+                    evaluate_and_update_ontology(_user_text, _orig_sql, _edit_sql)
                     st.session_state.pending_feedback = False
                     st.rerun()
             with b2:
-                if st.button("❌ No", use_container_width=True):
+                if st.button("❌ No, Ignore", width='stretch'):
                     st.session_state.pending_feedback = False
                     st.rerun()
 
