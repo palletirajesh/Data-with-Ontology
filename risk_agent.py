@@ -25,7 +25,7 @@ st.markdown("""
 
 # Secrets Management
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-TOGETHER_API_KEY1 = st.secrets.get("TOGETHER_API_KEY1", "") # Failover Key
+TOGETHER_API_KEY = st.secrets.get("TOGETHER_API_KEY", "") # Failover Key
 BQ_PROJECT = st.secrets["bigquery"]["project_id"]
 BQ_DATASET = st.secrets["bigquery"]["dataset_id"]
 HISTORY_TABLE = f"{BQ_PROJECT}.{BQ_DATASET}.query_history"
@@ -70,12 +70,12 @@ def call_llm_with_fallback(prompt):
         st.toast("📡 Groq Connection Failed. Attempting Fallback...")
 
     # --- TRY TOGETHER AI (The Demo Safety Net) ---
-    if not TOGETHER_API_KEY1:
-        st.error("Fallback Failed: No TOGETHER_API_KEY1 found in Streamlit Secrets.")
+    if not TOGETHER_API_KEY:
+        st.error("Fallback Failed: No TOGETHER_API_KEY found in Streamlit Secrets.")
         return ""
 
     url_tog = "https://api.together.xyz/v1/chat/completions"
-    headers_tog = {"Authorization": f"Bearer {TOGETHER_API_KEY1}", "Content-Type": "application/json"}
+    headers_tog = {"Authorization": f"Bearer {TOGETHER_API_KEY}", "Content-Type": "application/json"}
     payload_tog = {
         "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         "messages": [{"role": "user", "content": prompt}],
@@ -134,14 +134,14 @@ def build_context_string():
     """Loads physical schema and full ontology for 100% logic accuracy."""
     context = ""
     try:
-        with open("database_schema.md", "r") as f:
+        with open("database_schema_23ap.md", "r") as f:
             # We use the whole file. No slicing.
             context += f"--- DATABASE SCHEMA ---\n{f.read()}\n\n"
     except Exception as e:
         st.warning(f"Schema file missing: {e}")
 
     try:
-        with open("knowledge_base.jsonld", "r") as f:
+        with open("knowledge_base_23Ap.jsonld", "r") as f:
             # Full ontology for the LLM to understand jargon
             context += f"--- ONTOLOGY & JARGON MAPPING ---\n{f.read()}\n"
     except Exception as e:
