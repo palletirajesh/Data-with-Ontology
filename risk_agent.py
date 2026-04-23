@@ -98,7 +98,7 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
                 item["reviewStatus"] = "Pending_Review"
             
             # 2. NATIVE JSON HANDLING (Bypasses rdflib strictness)
-            file_path = "knowledge_base_23Ap.jsonld"
+            file_path = "knowledge_base.jsonld"
             
             with open(file_path, "r") as f:
                 kb_data = json.load(f)
