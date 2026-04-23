@@ -106,6 +106,7 @@ def generate_sql(user_query, context):
     16. TRANSLATION: Apply BUSINESS TRANSLATION RULES strictly to map user jargon to correct columns.
     17. TRANSPARENCY RULE (CRITICAL): Any column you use in the WHERE or HAVING clause MUST also be included in the SELECT clause. If you filter by a column, the user must be able to see it to verify your math (e.g., if you filter by `actual_payment_made`, you MUST SELECT `actual_payment_made`).
     18. GRANULARITY: Unless the user explicitly uses words like 'count', 'total', or 'how many', ALWAYS return a detailed list of records (SELECT *) rather than a summary or count.
+    19. Whenever writing a query that contains a JOIN, you must assign short table aliases (e.g., t1, t2) and explicitly prefix every single column in the SELECT and WHERE clauses with its corresponding alias. Never leave a column name unqualified.
     """
     
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_query}]
