@@ -48,7 +48,7 @@ def call_groq_llm(prompt):
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.0 # Dropped to 0.0 to strictly enforce SQL rules
+        "temperature": 0.0
     }
     response = requests.post(url, headers=headers, json=payload)
     if response.status_code == 200:
@@ -84,13 +84,13 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
                 item["dateAdded"] = today_str
                 item["reviewStatus"] = "Pending_Review"
             
-            st.toast(f"🔄 Learned new mapping. Flagged for review on {today_str}.")
-            
             g = rdflib.Graph()
             g.parse("knowledge_base.jsonld", format="json-ld")
             new_graph = rdflib.Graph().parse(data=json.dumps(new_knowledge_json), format="json-ld")
             g += new_graph
             g.serialize(destination="knowledge_base.jsonld", format="json-ld")
+            
+            st.success(f"✅ Model successfully retrained! Changes flagged for review on {today_str}.")
             
         except json.JSONDecodeError:
             st.warning("Feedback loop skipped: AI did not return strictly valid JSON.")
@@ -99,7 +99,6 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
 
 # --- 4. SEMANTIC CONTEXT LOADER ---
 def build_context_string():
-    """Loads the explicit schema and JSON-LD mapping to ground the LLM"""
     context = ""
     try:
         with open("database_schema.md", "r") as f:
@@ -115,8 +114,6 @@ def build_context_string():
         
     return context
 
-
-# --- 5. MAIN APP UI ---
 # --- 5. MAIN APP UI ---
 st.title("🏦 Risk Data Agent")
 st.markdown("Ask natural language questions to generate BigQuery SQL logic.")
@@ -134,8 +131,6 @@ if user_input:
             knowledge_context = build_context_string()
             full_path = f"{BQ_PROJECT}.{BQ_DATASET}"
             
-            # THE FIX: Use standard string concatenation (+) for the JSON context 
-            # to prevent Python from crashing on the curly brackets.
             system_prompt = (
                 "You are a BigQuery SQL Expert.\n\n"
                 "Context:\n" + knowledge_context + "\n\n"
@@ -170,6 +165,7 @@ if user_input:
             st.session_state.last_user_input = user_input
             st.session_state.sql_editor_key = final_sql 
             st.session_state.original_generated_sql = final_sql
+            st.session_state.pending_feedback = False # Reset feedback prompt for new questions
             if "last_df" in st.session_state:
                 del st.session_state["last_df"]
 
@@ -193,12 +189,12 @@ if user_input:
                     st.session_state.last_df = df
                     status.update(label=f"✅ Query Finished in {end_time - start_time:.2f}s", state="complete", expanded=False)
                     
+                    # Instead of updating automatically, we set a flag if the user edited the SQL
                     if user_edited_sql.strip() != st.session_state.original_generated_sql.strip():
-                        evaluate_and_update_ontology(
-                            user_input, 
-                            st.session_state.original_generated_sql, 
-                            user_edited_sql
-                        )
+                        st.session_state.pending_feedback = True
+                        st.session_state.edited_sql_for_feedback = user_edited_sql
+                    else:
+                        st.session_state.pending_feedback = False
                         
                 except Exception as e:
                     status.update(label="❌ Query Error", state="error")
@@ -206,9 +202,23 @@ if user_input:
 
     with col_res:
         st.subheader("📊 Data Results")
+        
+        # --- THE NEW RETRAINING UI PROMPT ---
+        if st.session_state.get("pending_feedback", False):
+            st.info("💡 **Looks like you have modified the LLM query. Do you want to retrain the model with these changes?**")
+            if st.button("🧠 Yes, retrain the model"):
+                with st.spinner("Analyzing and updating ontology..."):
+                    evaluate_and_update_ontology(
+                        user_input, 
+                        st.session_state.original_generated_sql, 
+                        st.session_state.edited_sql_for_feedback
+                    )
+                # Clear the flag so the button disappears after clicking
+                st.session_state.pending_feedback = False
+                st.rerun()
+
         if "last_df" in st.session_state:
             st.dataframe(st.session_state.last_df, use_container_width=True)
-
 
 # --- 6. ARCHITECTURE DETAILS ---
 st.divider()
