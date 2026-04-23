@@ -27,7 +27,7 @@ BQ_PROJECT = st.secrets["bigquery"]["project_id"]
 BQ_DATASET = st.secrets["bigquery"]["dataset_id"]
 
 # --- 2. ENGINES ---
-@st.cache_resource
+# IMPORTANT: @st.cache_resource removed here to prevent stale connection hangs
 def get_bq_client():
     info = st.secrets["gcp_service_account"]
     credentials = service_account.Credentials.from_service_account_info(info)
@@ -58,7 +58,6 @@ def call_groq_llm(prompt):
         return ""
 
 def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
-    """Evaluates user SQL edits, adds tracking metadata, and safely updates JSON-LD."""
     evaluation_prompt = f"""
     The user asked: "{user_text}"
     The AI generated: "{original_sql}"
@@ -126,48 +125,52 @@ if user_input:
     with col_sql:
         st.subheader("⚙️ Generated Logic")
         
-        with st.spinner("Translating intent to SQL via Llama-3..."):
-            
-            knowledge_context = build_context_string()
-            full_path = f"{BQ_PROJECT}.{BQ_DATASET}"
-            
-            system_prompt = (
-                "You are a BigQuery SQL Expert.\n\n"
-                "Context:\n" + knowledge_context + "\n\n"
-                "STRICT RULES:\n"
-                "1. ONLY use Tables/Columns in Context.\n"
-                "2. NEVER USE 'SELECT *'. You must explicitly name the columns in your SELECT statement.\n"
-                "3. DEFAULT COLUMNS: Whenever a user asks about 'customers' or 'clients', you MUST ALWAYS select at least:\n"
-                "   - `cust_id`\n"
-                "   - `customer_name`\n"
-                "   - `card_id`\n"
-                "4. DYNAMIC COLUMNS: In addition to the default columns, you MUST select the columns that relate to the user's conditions (e.g., if they ask about scores and dues, select `fico_score`, `payment_due_amount`, and `days_past_due`).\n"
-                "5. PROACTIVE JOINS: If picking dynamic columns requires other tables (like `card_partner` from dim_card_association), you MUST write the JOIN for that table.\n"
-                "7. NO PARENTHESES: Never put () after a table name.\n"
-                "8. Use MANDATORY JOINs exactly. Sequence tables logically.\n"
-                "9. Output ONLY raw SQL code. No markdown or explanations.\n"
-                "10. If data is missing, output EXACTLY: \"I cannot answer this with the available data.\"\n"
-                "11. Always begin with a SELECT clause. For multi-table joins, dim_customer should act a bridge table.\n"
-                f"12. EVERY table name in the SQL must be prefixed with: `{full_path}.`\n"
-                f"13. Example format: SELECT t1.cust_id FROM `{full_path}.dim_customer` t1 JOIN `{full_path}.dim_card_association` t2\n"
-                "14. Tables available: dim_customer, dim_card_association, fact_card_ledger, fact_credit_bureau.\n"
-                "15. For string filters, use: UPPER(column) = UPPER('value').\n"
-                "16. TRANSLATION: Apply BUSINESS TRANSLATION RULES strictly to map user jargon to correct columns.\n"
-                "17. TRANSPARENCY RULE (CRITICAL): Any column you use in the WHERE or HAVING clause MUST also be included in the SELECT clause. If you filter by a column, the user must be able to see it to verify your math (e.g., if you filter by `actual_payment_made`, you MUST SELECT `actual_payment_made`).\n"
-                "18. GRANULARITY: Unless the user explicitly uses words like 'count', 'total', or 'how many', ALWAYS return a detailed list of records (SELECT explicit columns) rather than a summary or count.\n"
-                "19. ALIASES: Whenever writing a query that contains a JOIN, you must assign short table aliases (e.g., t1, t2) and explicitly prefix every single column in the SELECT and WHERE clauses with its corresponding alias. Never leave a column name unqualified.\n\n"
-                f"Write BigQuery SQL for this user request: \"{user_input}\""
-            )
-            
-            final_sql = call_groq_llm(system_prompt).replace("```sql", "").replace("```", "").strip()
-            
-        if "last_user_input" not in st.session_state or st.session_state.last_user_input != user_input:
-            st.session_state.last_user_input = user_input
-            st.session_state.sql_editor_key = final_sql 
-            st.session_state.original_generated_sql = final_sql
-            st.session_state.pending_feedback = False # Reset feedback prompt for new questions
-            if "last_df" in st.session_state:
-                del st.session_state["last_df"]
+        # --- THE FIX: We ONLY call Groq if the user asked a BRAND NEW question! ---
+        is_new_question = ("last_user_input" not in st.session_state or st.session_state.last_user_input != user_input)
+        
+        if is_new_question:
+            with st.spinner("Translating intent to SQL via Llama-3..."):
+                knowledge_context = build_context_string()
+                full_path = f"{BQ_PROJECT}.{BQ_DATASET}"
+                
+                # All 19 Rules Kept Safely Intact
+                system_prompt = (
+                    "You are a BigQuery SQL Expert.\n\n"
+                    "Context:\n" + knowledge_context + "\n\n"
+                    "STRICT RULES:\n"
+                    "1. ONLY use Tables/Columns in Context.\n"
+                    "2. NEVER USE 'SELECT *'. You must explicitly name the columns in your SELECT statement.\n"
+                    "3. DEFAULT COLUMNS: Whenever a user asks about 'customers' or 'clients', you MUST ALWAYS select at least:\n"
+                    "   - `cust_id`\n"
+                    "   - `customer_name`\n"
+                    "   - `card_id`\n"
+                    "4. DYNAMIC COLUMNS: In addition to the default columns, you MUST select the columns that relate to the user's conditions (e.g., if they ask about scores and dues, select `fico_score`, `payment_due_amount`, and `days_past_due`).\n"
+                    "5. PROACTIVE JOINS: If picking dynamic columns requires other tables (like `card_partner` from dim_card_association), you MUST write the JOIN for that table.\n"
+                    "7. NO PARENTHESES: Never put () after a table name.\n"
+                    "8. Use MANDATORY JOINs exactly. Sequence tables logically.\n"
+                    "9. Output ONLY raw SQL code. No markdown or explanations.\n"
+                    "10. If data is missing, output EXACTLY: \"I cannot answer this with the available data.\"\n"
+                    "11. Always begin with a SELECT clause. For multi-table joins, dim_customer should act a bridge table.\n"
+                    f"12. EVERY table name in the SQL must be prefixed with: `{full_path}.`\n"
+                    f"13. Example format: SELECT t1.cust_id FROM `{full_path}.dim_customer` t1 JOIN `{full_path}.dim_card_association` t2\n"
+                    "14. Tables available: dim_customer, dim_card_association, fact_card_ledger, fact_credit_bureau.\n"
+                    "15. For string filters, use: UPPER(column) = UPPER('value').\n"
+                    "16. TRANSLATION: Apply BUSINESS TRANSLATION RULES strictly to map user jargon to correct columns.\n"
+                    "17. TRANSPARENCY RULE (CRITICAL): Any column you use in the WHERE or HAVING clause MUST also be included in the SELECT clause. If you filter by a column, the user must be able to see it to verify your math (e.g., if you filter by `actual_payment_made`, you MUST SELECT `actual_payment_made`).\n"
+                    "18. GRANULARITY: Unless the user explicitly uses words like 'count', 'total', or 'how many', ALWAYS return a detailed list of records (SELECT explicit columns) rather than a summary or count.\n"
+                    "19. ALIASES: Whenever writing a query that contains a JOIN, you must assign short table aliases (e.g., t1, t2) and explicitly prefix every single column in the SELECT and WHERE clauses with its corresponding alias. Never leave a column name unqualified.\n\n"
+                    f"Write BigQuery SQL for this user request: \"{user_input}\""
+                )
+                
+                final_sql = call_groq_llm(system_prompt).replace("```sql", "").replace("```", "").strip()
+                
+                # Save state so we don't call Groq again unless the user text changes
+                st.session_state.last_user_input = user_input
+                st.session_state.original_generated_sql = final_sql
+                st.session_state.sql_editor_key = final_sql 
+                st.session_state.pending_feedback = False 
+                if "last_df" in st.session_state:
+                    del st.session_state["last_df"]
 
         st.subheader("📝 Review and Edit SQL")
         
@@ -184,12 +187,15 @@ if user_input:
             start_time = time.perf_counter()
             with st.status("🚀 Running BigQuery Job...", expanded=True) as status:
                 try:
-                    df = bq_client.query(user_edited_sql).to_dataframe()
+                    # THE FIX: Added timeout=30 and create_bqstorage_client=False to bypass local gRPC network drops
+                    query_job = bq_client.query(user_edited_sql)
+                    query_result = query_job.result(timeout=30)
+                    df = query_result.to_dataframe(create_bqstorage_client=False)
+                    
                     end_time = time.perf_counter()
                     st.session_state.last_df = df
                     status.update(label=f"✅ Query Finished in {end_time - start_time:.2f}s", state="complete", expanded=False)
                     
-                    # Instead of updating automatically, we set a flag if the user edited the SQL
                     if user_edited_sql.strip() != st.session_state.original_generated_sql.strip():
                         st.session_state.pending_feedback = True
                         st.session_state.edited_sql_for_feedback = user_edited_sql
@@ -198,16 +204,14 @@ if user_input:
                         
                 except Exception as e:
                     status.update(label="❌ Query Error", state="error")
-                    st.error(e)
+                    st.error(f"Execution failed: {e}")
 
     with col_res:
         st.subheader("📊 Data Results")
         
-        # --- THE NEW RETRAINING UI PROMPT ---
         if st.session_state.get("pending_feedback", False):
             st.info("💡 **Looks like you have modified the LLM query. Do you want to retrain the model with these changes?**")
             
-            # Create columns to place the buttons side-by-side
             btn_col1, btn_col2, _ = st.columns([1.5, 1.5, 4]) 
             
             with btn_col1:
@@ -218,15 +222,16 @@ if user_input:
                             st.session_state.original_generated_sql, 
                             st.session_state.edited_sql_for_feedback
                         )
-                    # Clear the flag and force an immediate UI refresh
                     st.session_state.pending_feedback = False
                     st.rerun()
                     
             with btn_col2:
                 if st.button("❌ No, ignore", type="secondary", use_container_width=True):
-                    # Just clear the flag and force an immediate UI refresh
                     st.session_state.pending_feedback = False
                     st.rerun()
+
+        if "last_df" in st.session_state:
+            st.dataframe(st.session_state.last_df, use_container_width=True)
 
 # --- 6. ARCHITECTURE DETAILS ---
 st.divider()
