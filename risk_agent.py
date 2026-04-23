@@ -70,71 +70,90 @@ def call_groq_llm(prompt):
 import re # Add this import at the top of your file if not already there
 
 def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
+    """Evaluates user SQL edits and pushes learned logic to GitHub main branch."""
+    
+    # We add a specific instruction to avoid markdown to help the parser
     evaluation_prompt = f"""
     The user asked: "{user_text}"
     The AI generated: "{original_sql}"
     The User corrected to: "{edited_sql}"
     
     Did the user fix a table join, column mapping, or business jargon? 
-    If YES, extract the new mapping as a valid JSON array of objects (using our bank ontology).
-    ONLY return the JSON array. Do not include explanations or markdown backticks.
-    If NO, return exactly "MISMATCH".
+    If YES, extract the new mapping as a valid JSON array of objects using our bank ontology.
+    
+    STRICT DATA RULE: Return ONLY the raw JSON array string. 
+    NO markdown backticks, NO explanations, NO introductory text.
+    
+    If NO (irrelevant change), return exactly "MISMATCH".
     """
+    
     response = call_groq_llm(evaluation_prompt) 
     
     if "MISMATCH" not in response:
         try:
-            # 1. Safely extract JSON
-            json_match = re.search(r'\[.*\]|\{.*\}', response, re.DOTALL)
+            # --- IMPROVED EXTRACTION LOGIC ---
+            # 1. Strip out markdown code blocks if the LLM used them
+            clean_response = response.replace("```json", "").replace("```", "").strip()
+            
+            # 2. Use a more robust regex to find the first [ and the last ]
+            json_match = re.search(r'\[.*\]', clean_response, re.DOTALL)
+            
             if not json_match:
-                raise ValueError("No valid JSON found in LLM response.")
-                
+                # If it's not an array, check if it's a single object {}
+                json_match = re.search(r'\{.*\}', clean_response, re.DOTALL)
+            
+            if not json_match:
+                st.error("🤖 The AI didn't provide a valid JSON structure.")
+                with st.expander("See AI Raw Response"):
+                    st.text(response)
+                return
+
             new_knowledge_json = json.loads(json_match.group(0))
             if isinstance(new_knowledge_json, dict):
                 new_knowledge_json = [new_knowledge_json]
-                
+            # ----------------------------------
+
             today_str = date.today().isoformat()
             for item in new_knowledge_json:
                 item["dateAdded"] = today_str
                 item["reviewStatus"] = "Pending_Review"
             
-            # --- THE GITHUB FIX ---
-            # Make sure this matches the EXACT name of the file in your GitHub repo
-            file_path = "knowledge_base.jsonld" 
+            # GitHub Config
+            token = st.secrets["github"]["token"]
+            repo_path = "palletirajesh/Data-with-Ontology"
+            file_name = "knowledge_base_23Ap.jsonld" 
             
-            # Connect to GitHub
-            g = Github(st.secrets["github"]["token"])
-            repo = g.get_repo(st.secrets["github"]["repo"])
+            g = Github(token)
+            repo = g.get_repo(repo_path)
             
-            # Fetch the current file from GitHub
-            contents = repo.get_contents(file_path)
+            # Fetch from GitHub (ensures we aren't editing an old local copy)
+            contents = repo.get_contents(file_name, ref="main")
             kb_data = json.loads(contents.decoded_content.decode("utf-8"))
             
-            # Append the new AI mappings to the @graph array
+            # Merge and Push
             if "@graph" in kb_data:
                 kb_data["@graph"].extend(new_knowledge_json)
             else:
                 kb_data["@graph"] = new_knowledge_json
                 
-            updated_json_str = json.dumps(kb_data, indent=2)
-            
-            # Push the updated file BACK to GitHub
             repo.update_file(
                 path=contents.path,
                 message=f"🤖 AI Retrain: {user_text[:30]}...",
-                content=updated_json_str,
+                content=json.dumps(kb_data, indent=2),
                 sha=contents.sha,
-                branch="main"  # <--- FORCE IT TO THE MAIN BRANCH
+                branch="main" # Strictly locking to main branch
             )
             
-            st.success(f"✅ Model retrained and pushed to GitHub main branch!")
+            st.success("✅ Knowledge successfully pushed to GitHub main branch!")
             time.sleep(10)
             
         except json.JSONDecodeError:
-            st.warning("Feedback loop skipped: AI did not return strictly valid JSON.")
+            st.warning("⚠️ Feedback loop skipped: AI returned malformed JSON.")
+            with st.expander("View Malformed JSON for Debug"):
+                st.code(response)
             time.sleep(10)
         except Exception as e:
-            st.error(f"Error pushing to GitHub: {e}")
+            st.error(f"❌ GitHub Sync Failed: {e}")
             time.sleep(10)
 
 def build_context_string():
