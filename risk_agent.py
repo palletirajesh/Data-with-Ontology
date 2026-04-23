@@ -117,6 +117,7 @@ def build_context_string():
 
 
 # --- 5. MAIN APP UI ---
+# --- 5. MAIN APP UI ---
 st.title("🏦 Risk Data Agent")
 st.markdown("Ask natural language questions to generate BigQuery SQL logic.")
 
@@ -131,34 +132,37 @@ if user_input:
         with st.spinner("Translating intent to SQL via Llama-3..."):
             
             knowledge_context = build_context_string()
+            full_path = f"{BQ_PROJECT}.{BQ_DATASET}"
             
-            # --- THE FIX: STRICTER SQL RULES & BQ PREFIX INJECTION ---
-            system_prompt = f"""You are a BigQuery SQL Expert. 
-    Context: {context}
-    
-    STRICT RULES:
-    1. ONLY use Tables/Columns in Context.
-    2. NEVER USE 'SELECT *'. You must explicitly name the columns in your SELECT statement.
-    3. DEFAULT COLUMNS: Whenever a user asks about 'customers' or 'clients', you MUST ALWAYS select at least:
-       - `cust_id`
-       - `customer_name`
-       - `card_id`
-    4. DYNAMIC COLUMNS: In addition to the default columns, you MUST select the columns that relate to the user's conditions (e.g., if they ask about scores and dues, select `fico_score`, `payment_due_amount`, and `days_past_due`).
-    5. PROACTIVE JOINS: If picking dynamic columns requires other tables (like `card_partner` from dim_card_association), you MUST write the JOIN for that table.
-    7. NO PARENTHESES: Never put () after a table name.
-    8. Use MANDATORY JOINs exactly. Sequence tables logically.
-    9. Output ONLY raw SQL code. No markdown or explanations.
-    10. If data is missing, output EXACTLY: "I cannot answer this with the available data."
-    11. Always begin with a SELECT clause. For multi-table joins, dim_customer should act a bridge table
-    12. EVERY table name in the SQL must be prefixed with: `{full_path}.
-    13. Example format: SELECT * FROM `{full_path}.dim_customer` JOIN `{full_path}.dim_card_association`
-    14. Tables available: dim_customer, dim_card_association, fact_card_ledger, fact_credit_bureau.
-    15. For string filters, use: UPPER(column) = UPPER('value').
-    16. TRANSLATION: Apply BUSINESS TRANSLATION RULES strictly to map user jargon to correct columns.
-    17. TRANSPARENCY RULE (CRITICAL): Any column you use in the WHERE or HAVING clause MUST also be included in the SELECT clause. If you filter by a column, the user must be able to see it to verify your math (e.g., if you filter by `actual_payment_made`, you MUST SELECT `actual_payment_made`).
-    18. GRANULARITY: Unless the user explicitly uses words like 'count', 'total', or 'how many', ALWAYS return a detailed list of records (SELECT *) rather than a summary or count.
-    19. Whenever writing a query that contains a JOIN, you must assign short table aliases (e.g., t1, t2) and explicitly prefix every single column in the SELECT and WHERE clauses with its corresponding alias. Never leave a column name unqualified.
-    """
+            # THE FIX: Use standard string concatenation (+) for the JSON context 
+            # to prevent Python from crashing on the curly brackets.
+            system_prompt = (
+                "You are a BigQuery SQL Expert.\n\n"
+                "Context:\n" + knowledge_context + "\n\n"
+                "STRICT RULES:\n"
+                "1. ONLY use Tables/Columns in Context.\n"
+                "2. NEVER USE 'SELECT *'. You must explicitly name the columns in your SELECT statement.\n"
+                "3. DEFAULT COLUMNS: Whenever a user asks about 'customers' or 'clients', you MUST ALWAYS select at least:\n"
+                "   - `cust_id`\n"
+                "   - `customer_name`\n"
+                "   - `card_id`\n"
+                "4. DYNAMIC COLUMNS: In addition to the default columns, you MUST select the columns that relate to the user's conditions (e.g., if they ask about scores and dues, select `fico_score`, `payment_due_amount`, and `days_past_due`).\n"
+                "5. PROACTIVE JOINS: If picking dynamic columns requires other tables (like `card_partner` from dim_card_association), you MUST write the JOIN for that table.\n"
+                "7. NO PARENTHESES: Never put () after a table name.\n"
+                "8. Use MANDATORY JOINs exactly. Sequence tables logically.\n"
+                "9. Output ONLY raw SQL code. No markdown or explanations.\n"
+                "10. If data is missing, output EXACTLY: \"I cannot answer this with the available data.\"\n"
+                "11. Always begin with a SELECT clause. For multi-table joins, dim_customer should act a bridge table.\n"
+                f"12. EVERY table name in the SQL must be prefixed with: `{full_path}.`\n"
+                f"13. Example format: SELECT t1.cust_id FROM `{full_path}.dim_customer` t1 JOIN `{full_path}.dim_card_association` t2\n"
+                "14. Tables available: dim_customer, dim_card_association, fact_card_ledger, fact_credit_bureau.\n"
+                "15. For string filters, use: UPPER(column) = UPPER('value').\n"
+                "16. TRANSLATION: Apply BUSINESS TRANSLATION RULES strictly to map user jargon to correct columns.\n"
+                "17. TRANSPARENCY RULE (CRITICAL): Any column you use in the WHERE or HAVING clause MUST also be included in the SELECT clause. If you filter by a column, the user must be able to see it to verify your math (e.g., if you filter by `actual_payment_made`, you MUST SELECT `actual_payment_made`).\n"
+                "18. GRANULARITY: Unless the user explicitly uses words like 'count', 'total', or 'how many', ALWAYS return a detailed list of records (SELECT explicit columns) rather than a summary or count.\n"
+                "19. ALIASES: Whenever writing a query that contains a JOIN, you must assign short table aliases (e.g., t1, t2) and explicitly prefix every single column in the SELECT and WHERE clauses with its corresponding alias. Never leave a column name unqualified.\n\n"
+                f"Write BigQuery SQL for this user request: \"{user_input}\""
+            )
             
             final_sql = call_groq_llm(system_prompt).replace("```sql", "").replace("```", "").strip()
             
@@ -204,6 +208,7 @@ if user_input:
         st.subheader("📊 Data Results")
         if "last_df" in st.session_state:
             st.dataframe(st.session_state.last_df, use_container_width=True)
+
 
 # --- 6. ARCHITECTURE DETAILS ---
 st.divider()
