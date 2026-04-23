@@ -5,9 +5,9 @@ from datetime import date
 import streamlit as st
 import pandas as pd
 import re
-import requests
 import re
 from github import Github # Make sure to import this at the top of your file!
+import requests
 import rdflib
 from google.cloud import bigquery
 from google.oauth2 import service_account
@@ -120,14 +120,14 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
             
             # Push the updated file BACK to GitHub
             repo.update_file(
-                contents.path,
-                f"🤖 Agent Auto-Retrain: Updated Ontology on {today_str}",
-                updated_json_str,
-                contents.sha
+                path=contents.path,
+                message=f"🤖 AI Retrain: {user_text[:30]}...",
+                content=updated_json_str,
+                sha=contents.sha,
+                branch="main"  # <--- FORCE IT TO THE MAIN BRANCH
             )
-            # ------------------------
             
-            st.success(f"✅ Model retrained! Changes pushed directly to GitHub for review.")
+            st.success(f"✅ Model retrained and pushed to GitHub main branch!")
             time.sleep(10)
             
         except json.JSONDecodeError:
