@@ -25,7 +25,7 @@ st.markdown("""
 
 # Secrets Management
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-TOGETHER_API_KEY1 = st.secrets.get("TOGETHER_API_KEY1", "") # Failover Key
+TOGETHER_API_KEY = st.secrets.get("TOGETHER_API_KEY1", "") # Failover Key
 BQ_PROJECT = st.secrets["bigquery"]["project_id"]
 BQ_DATASET = st.secrets["bigquery"]["dataset_id"]
 HISTORY_TABLE = f"{BQ_PROJECT}.{BQ_DATASET}.query_history"
@@ -70,12 +70,12 @@ def call_llm_with_fallback(prompt):
         st.toast("📡 Groq Connection Failed. Attempting Fallback...")
 
     # --- TRY TOGETHER AI (The Demo Safety Net) ---
-    if not TOGETHER_API_KEY:
-        st.error("Fallback Failed: No TOGETHER_API_KEY found in Streamlit Secrets.")
+    if not TOGETHER_API_KEY1:
+        st.error("Fallback Failed: No TOGETHER_API_KEY1 found in Streamlit Secrets.")
         return ""
 
     url_tog = "https://api.together.xyz/v1/chat/completions"
-    headers_tog = {"Authorization": f"Bearer {TOGETHER_API_KEY}", "Content-Type": "application/json"}
+    headers_tog = {"Authorization": f"Bearer {TOGETHER_API_KEY1}", "Content-Type": "application/json"}
     payload_tog = {
         "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         "messages": [{"role": "user", "content": prompt}],
@@ -105,25 +105,50 @@ def load_persistent_history():
         return pd.DataFrame(columns=["user_query", "generated_sql"])
 
 def save_query_to_db(user_text, sql):
-    """Save generation to BigQuery history."""
+    """Saves to BigQuery and explicitly reports any schema or permission errors."""
     try:
-        rows = [{"user_query": user_text, "generated_sql": sql, "timestamp": datetime.now().isoformat()}]
-        bq_client.insert_rows_json(HISTORY_TABLE, rows)
-    except Exception as e:
-        st.warning(f"Note: History log failed: {e}")
+        # Check if the inputs are valid
+        if not user_text or not sql:
+            return
 
+        rows_to_insert = [{
+            "user_query": user_text, # Must match BQ Column Name exactly
+            "generated_sql": sql,    # Must match BQ Column Name exactly
+            "timestamp": datetime.now().isoformat()
+        }]
+        
+        # Capture the errors from the BigQuery insert
+        errors = bq_client.insert_rows_json(HISTORY_TABLE, rows_to_insert)
+        
+        if errors:
+            st.error(f"❌ BigQuery Schema/Insert Error: {errors}")
+            # This will show you exactly which column name BQ is rejecting
+        else:
+            st.toast("✅ Query successfully persisted to BigQuery history.")
+            
+    except Exception as e:
+        st.error(f"❌ BigQuery Connection Error: {e}")
+
+# --- UPDATED CONTEXT (NO TRIMMING) ---
 def build_context_string():
-    """Reads FULL Schema and Ontology files for maximum accuracy."""
+    """Loads physical schema and full ontology for 100% logic accuracy."""
     context = ""
     try:
-        with open("database_schema.md", "r") as f:
+        with open("database_schema_23ap.md", "r") as f:
+            # We use the whole file. No slicing.
             context += f"--- DATABASE SCHEMA ---\n{f.read()}\n\n"
-    except: pass
+    except Exception as e:
+        st.warning(f"Schema file missing: {e}")
+
     try:
-        with open("knowledge_base.jsonld", "r") as f:
+        with open("knowledge_base_23Ap.jsonld", "r") as f:
+            # Full ontology for the LLM to understand jargon
             context += f"--- ONTOLOGY & JARGON MAPPING ---\n{f.read()}\n"
-    except: pass
+    except Exception as e:
+        st.warning(f"Ontology file missing: {e}")
+        
     return context
+
 
 def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
     """Pushes logic corrections back to GitHub."""
