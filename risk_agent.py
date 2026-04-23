@@ -6,7 +6,7 @@ from datetime import datetime, date
 import streamlit as st
 import pandas as pd
 import requests
-from github import Github, Auth  # Modern GitHub Auth
+from github import Github, Auth  # Modern GitHub Auth for v10+
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from sentence_transformers import SentenceTransformer, util
@@ -83,9 +83,9 @@ def call_llm_with_fallback(prompt):
         if res_tog.status_code == 200:
             st.toast("✅ Fallback Successful (Together AI)")
             return res_tog.json()["choices"][0]["message"]["content"]
-        return f"Error: {res_tog.status_code}"
-    except Exception as e:
-        return f"Failover Error: {e}"
+        return ""
+    except Exception:
+        return ""
 
 # --- 4. PERSISTENCE & GITHUB UPDATES ---
 
@@ -107,19 +107,22 @@ def save_query_to_db(user_text, sql):
         }]
         errors = bq_client.insert_rows_json(HISTORY_TABLE, rows_to_insert)
         if errors:
-            st.error(f"BQ Save Error: {errors}")
+            st.error(f"BQ Save Error (Column mismatch?): {errors}")
         else:
             st.toast("✅ Saved to History")
     except Exception as e:
         st.error(f"Save Failed: {e}")
 
 def build_context_string():
-    """Reads FULL Schema and Ontology files."""
+    """Reads FULL Schema and Ontology files for maximum AI accuracy."""
     context = ""
+    # RESTORED FILENAME: database_schema.md
     try:
         with open("database_schema.md", "r") as f:
             context += f"--- DATABASE SCHEMA ---\n{f.read()}\n\n"
     except: pass
+    
+    # FILENAME: knowledge_base.jsonld
     try:
         with open("knowledge_base.jsonld", "r") as f:
             context += f"--- ONTOLOGY ---\n{f.read()}\n"
@@ -128,44 +131,50 @@ def build_context_string():
 
 def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
     """Pushes logic corrections back to GitHub (knowledge_base.jsonld)."""
-    prompt = f"User asked '{user_text}'. AI wrote '{original_sql}'. User corrected to '{edited_sql}'. Extract business jargon mapping as a raw JSON array. If nothing new, return 'MISMATCH'."
-    response = call_llm_with_fallback(prompt)
+    with st.spinner("Analyzing edits for retraining..."):
+        prompt = f"User asked '{user_text}'. AI wrote '{original_sql}'. User corrected to '{edited_sql}'. Extract business jargon mapping as a raw JSON array. If nothing new, return 'MISMATCH'."
+        response = call_llm_with_fallback(prompt)
     
-    if "MISMATCH" not in response:
-        try:
-            # Robust JSON cleaning
-            clean = response.replace("```json", "").replace("```", "").strip()
-            match = re.search(r'\[.*\]', clean, re.DOTALL)
-            if not match: return
-            
-            new_mappings = json.loads(match.group(0))
-            today = date.today().isoformat()
-            for m in new_mappings:
-                m["dateAdded"] = today
-                m["reviewStatus"] = "Pending_Review"
-            
-            # Modern GitHub Auth
-            auth = Auth.Token(st.secrets["github"]["token"])
-            g = Github(auth=auth)
-            repo = g.get_repo(st.secrets["github"]["repo"])
-            
-            # FILENAME: knowledge_base.jsonld
-            file_path = "knowledge_base.jsonld"
-            contents = repo.get_contents(file_path, ref="main")
-            kb = json.loads(contents.decoded_content.decode("utf-8"))
-            kb.setdefault("@graph", []).extend(new_mappings)
-            
-            repo.update_file(
-                path=contents.path,
-                message=f"🤖 AI Retrain: {user_text[:20]}",
-                content=json.dumps(kb, indent=2),
-                sha=contents.sha,
-                branch="main"
-            )
-            st.success("✅ Knowledge base updated on GitHub!")
-            time.sleep(1)
-        except Exception as e:
-            st.error(f"GitHub Sync Failed: {e}")
+    if "MISMATCH" in response:
+        st.warning("Retrain Skipped: AI found no new business logic in your edits.")
+        return
+
+    try:
+        # Robust JSON cleaning
+        clean = response.replace("```json", "").replace("```", "").strip()
+        match = re.search(r'\[.*\]', clean, re.DOTALL)
+        if not match: 
+            st.error("AI returned invalid mapping format. Check logs.")
+            return
+        
+        new_mappings = json.loads(match.group(0))
+        today = date.today().isoformat()
+        for m in new_mappings:
+            m["dateAdded"] = today
+            m["reviewStatus"] = "Pending_Review"
+        
+        # Modern GitHub Auth (Fixes DeprecationWarning in logs)
+        auth = Auth.Token(st.secrets["github"]["token"])
+        g = Github(auth=auth)
+        repo_name = st.secrets["github"]["repo"]
+        repo = g.get_repo(repo_name)
+        
+        file_path = "knowledge_base.jsonld"
+        contents = repo.get_contents(file_path, ref="main")
+        kb = json.loads(contents.decoded_content.decode("utf-8"))
+        kb.setdefault("@graph", []).extend(new_mappings)
+        
+        repo.update_file(
+            path=contents.path,
+            message=f"🤖 AI Retrain: {user_text[:20]}",
+            content=json.dumps(kb, indent=2),
+            sha=contents.sha,
+            branch="main"
+        )
+        st.success(f"✅ GitHub Updated: {len(new_mappings)} new rules added!")
+        time.sleep(1)
+    except Exception as e:
+        st.error(f"❌ GitHub Sync Failed: {e}")
 
 # --- 5. UI & SIDEBAR SYNC ---
 if "db_history" not in st.session_state:
@@ -173,12 +182,12 @@ if "db_history" not in st.session_state:
 
 with st.sidebar:
     st.header("🕒 Query History")
-    if st.button("🔄 Sync with BQ"):
+    if st.button("🔄 Sync with BigQuery"):
         st.session_state.db_history = load_persistent_history()
     
     st.markdown("---")
     for idx, row in st.session_state.db_history.iterrows():
-        # Clicking restores full query text and underlying SQL
+        # ON CLICK: Restore the full UI state
         if st.button(row['user_query'], key=f"h_{idx}", use_container_width=True):
             st.session_state.main_input = row['user_query']
             st.session_state.sql_editor_key = row['generated_sql']
@@ -188,6 +197,7 @@ with st.sidebar:
 
 # --- 6. MAIN WORKFLOW ---
 st.title("🏦 Risk Data Agent")
+# Linked to 'main_input' for sidebar sync
 user_input = st.text_input("What risk data do you need?", key="main_input", placeholder="e.g. Amazon customers with late payments...")
 
 if user_input:
@@ -196,10 +206,10 @@ if user_input:
     with col_sql:
         st.subheader("⚙️ Generated Logic")
         
-        # Logic to trigger new generation OR load from state
+        # Check if we need to call the AI OR load from memory
         if "last_user_input" not in st.session_state or st.session_state.last_user_input != user_input:
             
-            # Semantic Cache Check (Threshold: 0.94)
+            # Semantic Cache Check
             cached_sql = None
             if not st.session_state.db_history.empty:
                 curr_emb = embedder.encode(user_input, convert_to_tensor=True)
@@ -252,6 +262,7 @@ if user_input:
                 try:
                     job = bq_client.query(user_sql)
                     st.session_state.last_df = job.result(timeout=30).to_dataframe(create_bqstorage_client=False)
+                    # Trigger retraining prompt if user edited the SQL
                     if user_sql.strip() != st.session_state.original_generated_sql.strip():
                         st.session_state.pending_feedback = True
                         st.session_state.edited_sql_for_feedback = user_sql
