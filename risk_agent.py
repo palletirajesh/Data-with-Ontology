@@ -83,11 +83,11 @@ def build_context_string():
     """Loads the FULL schema and ontology files without trimming."""
     context = ""
     try:
-        with open("database_schema_23ap.md", "r") as f:
+        with open("database_schema.md", "r") as f:
             context += f"--- DATABASE SCHEMA ---\n{f.read()}\n\n"
     except: pass
     try:
-        with open("knowledge_base_23Ap.jsonld", "r") as f:
+        with open("knowledge_base.jsonld", "r") as f:
             context += f"--- ONTOLOGY & JARGON MAPPING ---\n{f.read()}\n"
     except: pass
     return context
@@ -119,7 +119,7 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
                 item["reviewStatus"] = "Pending_Review"
             
             repo = Github(st.secrets["github"]["token"]).get_repo("palletirajesh/Data-with-Ontology")
-            contents = repo.get_contents("knowledge_base_23Ap.jsonld", ref="main")
+            contents = repo.get_contents("knowledge_base.jsonld", ref="main")
             kb_data = json.loads(contents.decoded_content.decode("utf-8"))
             
             kb_data.setdefault("@graph", []).extend(new_data)
