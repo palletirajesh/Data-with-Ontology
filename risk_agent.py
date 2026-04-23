@@ -23,6 +23,8 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+BQ_PROJECT = st.secrets["bigquery"]["project_id"]
+BQ_DATASET = st.secrets["bigquery"]["dataset_id"]
 
 # --- 2. ENGINES ---
 @st.cache_resource
@@ -46,7 +48,7 @@ def call_groq_llm(prompt):
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1
+        "temperature": 0.0 # Dropped to 0.0 to strictly enforce SQL rules
     }
     response = requests.post(url, headers=headers, json=payload)
     if response.status_code == 200:
@@ -95,18 +97,16 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
         except Exception as e:
             st.error(f"Error updating ontology: {e}")
 
-# --- 4. SEMANTIC CONTEXT LOADER (Restored from Original/v0) ---
+# --- 4. SEMANTIC CONTEXT LOADER ---
 def build_context_string():
     """Loads the explicit schema and JSON-LD mapping to ground the LLM"""
     context = ""
-    # 1. Load Markdown Schema
     try:
         with open("database_schema.md", "r") as f:
             context += f"--- DATABASE SCHEMA ---\n{f.read()}\n\n"
     except Exception as e:
         st.warning(f"Could not load schema: {e}")
 
-    # 2. Load JSON-LD Ontology
     try:
         with open("knowledge_base.jsonld", "r") as f:
             context += f"--- ONTOLOGY & JARGON MAPPING ---\n{f.read()}\n"
@@ -130,16 +130,35 @@ if user_input:
         
         with st.spinner("Translating intent to SQL via Llama-3..."):
             
-            # --- RESTORED LOGIC: Injecting the actual knowledge base context ---
             knowledge_context = build_context_string()
             
-            # Combine the strict alias rules + the context + the user prompt
+            # --- THE FIX: STRICTER SQL RULES & BQ PREFIX INJECTION ---
             system_prompt = f"""
-            You are a BigQuery SQL expert. Use the SCHEMA and ONTOLOGY provided below to write a query.
+            You are a precise BigQuery SQL expert. Use the SCHEMA and ONTOLOGY provided below to write a query.
             
-            CRITICAL SQL RULE: Whenever writing a query with a JOIN, you MUST assign short 
-            table aliases (e.g., t1, t2) and explicitly prefix EVERY SINGLE column in the 
-            SELECT and WHERE clauses with its corresponding alias to prevent ambiguous columns.
+            CRITICAL SQL RULES:
+            11. ONLY use Tables/Columns in Context.
+    2. NEVER USE 'SELECT *'. You must explicitly name the columns in your SELECT statement.
+    3. DEFAULT COLUMNS: Whenever a user asks about 'customers' or 'clients', you MUST ALWAYS select at least:
+       - `cust_id`
+       - `customer_name`
+       - `card_id`
+    4. DYNAMIC COLUMNS: In addition to the default columns, you MUST select the columns that relate to the user's conditions (e.g., if they ask about scores and dues, select `fico_score`, `payment_due_amount`, and `days_past_due`).
+    5. PROACTIVE JOINS: If picking dynamic columns requires other tables (like `card_partner` from dim_card_association), you MUST write the JOIN for that table.
+    6. Table Format: ALWAYS use backticks and the full path: `{full_path}.table_name`
+    7. NO PARENTHESES: Never put () after a table name.
+    8. Use MANDATORY JOINs exactly. Sequence tables logically.
+    9. Output ONLY raw SQL code. No markdown or explanations.
+    10. If data is missing, output EXACTLY: "I cannot answer this with the available data."
+    11. Always begin with a SELECT clause. For multi-table joins, dim_customer should act a bridge table
+    12. EVERY table name in the SQL must be prefixed with: `{full_path}.
+    13. Example format: SELECT * FROM `{full_path}.dim_customer` JOIN `{full_path}.dim_card_association`
+    14. Tables available: dim_customer, dim_card_association, fact_card_ledger, fact_credit_bureau.
+    15. For string filters, use: UPPER(column) = UPPER('value').
+    16. TRANSLATION: Apply BUSINESS TRANSLATION RULES strictly to map user jargon to correct columns.
+    17. TRANSPARENCY RULE (CRITICAL): Any column you use in the WHERE or HAVING clause MUST also be included in the SELECT clause. If you filter by a column, the user must be able to see it to verify your math (e.g., if you filter by `actual_payment_made`, you MUST SELECT `actual_payment_made`).
+    18. GRANULARITY: Unless the user explicitly uses words like 'count', 'total', or 'how many', ALWAYS return a detailed list of records (SELECT *) rather than a summary or count.
+    19. Whenever writing a query that contains a JOIN, you must assign short table aliases (e.g., t1, t2) and explicitly prefix every single column 
             
             {knowledge_context}
             
@@ -158,7 +177,6 @@ if user_input:
 
         st.subheader("📝 Review and Edit SQL")
         
-        # --- WORKING EXECUTION BLOCK (From v1) ---
         with st.form("sql_editor_form"):
             user_edited_sql = st.text_area(
                 "Modify the query below if needed before running:", 
