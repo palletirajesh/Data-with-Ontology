@@ -7,13 +7,12 @@ from datetime import datetime, date
 import streamlit as st
 import pandas as pd
 import requests
-from github import Github, Auth  # Modern GitHub Auth
+from github import Github, Auth
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from sentence_transformers import SentenceTransformer, util
 
-# --- 0. SUPPRESS LOG NOISE (Issue #3) ---
-# Silences the noise from transformers/torchvision mentioned in your logs
+# --- 0. SUPPRESS LOG NOISE ---
 logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("torch").setLevel(logging.ERROR)
 
@@ -93,39 +92,49 @@ def build_context_string():
     return context
 
 def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
-    """
-    Returns a status dict instead of using st.success/st.error directly.
-    This ensures the message is preserved across the st.rerun().
-    """
-    prompt = f"""Compare the SQL queries for the question: "{user_text}"
-    Original AI SQL: {original_sql}
-    User Corrected SQL: {edited_sql}
+    """Refined GitHub Push with enhanced JSON validation."""
+    prompt = f"""Compare these SQL queries for the question: "{user_text}"
+    Original: {original_sql}
+    User Edit: {edited_sql}
     
-    Identify any new mapping (term -> table/column/filter). 
-    Return a JSON array of objects with "term", "original_mapping", "correct_mapping", "correction_type".
-    If the changes are only cosmetic or identical, return exactly: MISMATCH
-    Return ONLY raw JSON or MISMATCH."""
+    Identify the new business mapping. 
+    Return a STRICT JSON array of objects.
+    Example format: [{{"term": "...", "original_mapping": "...", "correct_mapping": "..."}}]
+    If no significant logic changes, return exactly: MISMATCH
+    IMPORTANT: Ensure the JSON is perfectly formatted with commas between objects."""
     
     response = call_llm_with_fallback(prompt)
     
-    # Robust Substring Check (Issue #2)
     if not response or response.strip().upper() == "MISMATCH":
-        return {"status": "warning", "msg": "Retrain Skipped: AI found no logic changes."}
+        return {"status": "warning", "msg": "Retrain Skipped: No logic changes detected."}
 
     try:
+        # 1. PARSE NEW MAPPINGS FROM AI
         clean = response.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\[.*\]', clean, re.DOTALL)
         if not match: 
-            return {"status": "error", "msg": "AI returned invalid mapping format."}
+            return {"status": "error", "msg": "AI failed to generate a valid JSON array."}
         
-        new_mappings = json.loads(match.group(0))
+        try:
+            new_mappings = json.loads(match.group(0))
+        except json.JSONDecodeError as je:
+            return {"status": "error", "msg": f"AI generated malformed JSON: {je}"}
+        
+        # 2. CONNECT TO GITHUB
         auth = Auth.Token(st.secrets["github"]["token"])
         g = Github(auth=auth)
         repo = g.get_repo(st.secrets["github"]["repo"])
         
+        # 3. FETCH AND VALIDATE EXISTING FILE
         contents = repo.get_contents("knowledge_base.jsonld", ref="main")
-        kb = json.loads(contents.decoded_content.decode("utf-8"))
+        raw_content = contents.decoded_content.decode("utf-8")
         
+        try:
+            kb = json.loads(raw_content)
+        except json.JSONDecodeError as je:
+            return {"status": "error", "msg": f"CRITICAL: The knowledge_base.jsonld file ON GITHUB is currently corrupted at {je}. Please fix it manually."}
+        
+        # 4. UPDATE DATA
         today = date.today().isoformat()
         for m in new_mappings:
             m["dateAdded"] = today
@@ -133,6 +142,7 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
             
         kb.setdefault("@graph", []).extend(new_mappings)
         
+        # 5. PUSH CLEAN JSON
         repo.update_file(
             path=contents.path,
             message=f"🤖 AI Retrain: {user_text[:20]}",
@@ -164,13 +174,12 @@ with st.sidebar:
 # --- 6. MAIN WORKFLOW ---
 st.title("🏦 Risk Data Agent")
 
-# DISPLAY LAST FEEDBACK RESULT (Issue #1)
 if "retrain_result" in st.session_state:
     res = st.session_state.retrain_result
     if res["status"] == "success": st.success(res["msg"])
     elif res["status"] == "warning": st.warning(res["msg"])
     else: st.error(res["msg"])
-    del st.session_state.retrain_result # Clear after showing once
+    del st.session_state.retrain_result
 
 user_input = st.text_input("What data do you need?", key="main_input")
 
@@ -180,7 +189,6 @@ if user_input:
     
     with col_sql:
         if "last_user_input" not in st.session_state or st.session_state.last_user_input != user_input:
-            # Semantic Cache
             cached_sql = None
             if not st.session_state.db_history.empty:
                 scores = util.cos_sim(embedder.encode(user_input), embedder.encode(st.session_state.db_history['user_query'].tolist()))[0]
@@ -193,12 +201,10 @@ if user_input:
                 with st.spinner("Generating SQL..."):
                     context = build_context_string()
                     full_path = f"{BQ_PROJECT}.{BQ_DATASET}"
-                    # THE 19 RULES
                     system_prompt = (
                         "You are a BigQuery SQL Expert.\n\nContext:\n" + context + "\n\n"
-                        "STRICT RULES:\n1. Use Context only. 2. No SELECT *. 3. Always select: cust_id, customer_name, card_id.\n"
-                        "4. Join tables as needed. 5. Prefix: " + full_path + ". 6. Aliases: t1, t2.\n"
-                        "7. UPPER(col) = UPPER('val') for filters. 8. RAW SQL ONLY.\n\nTask: " + user_input
+                        "RULES: 1. Use Context only. 2. No SELECT *. 3. Always select: cust_id, customer_name, card_id.\n"
+                        "4. Join tables as needed. 5. Prefix: " + full_path + ". 6. RAW SQL ONLY.\n\nTask: " + user_input
                     )
                     final_sql = call_llm_with_fallback(system_prompt).replace("```sql", "").replace("```", "").strip()
                     save_query_to_db(user_input, final_sql)
@@ -225,12 +231,9 @@ if user_input:
             b1, b2, _ = st.columns([1.5, 1.5, 4])
             with b1:
                 if st.button("🧠 Yes, Retrain", width='stretch'):
-                    # PULL PRESERVED STATE (Issue #1 Fix)
                     _q = st.session_state.get("last_user_input_preserved", "")
                     _o = st.session_state.original_generated_sql
                     _e = st.session_state.edited_sql_for_feedback
-                    
-                    # Store result in session state before rerun
                     st.session_state.retrain_result = evaluate_and_update_ontology(_q, _o, _e)
                     st.session_state.pending_feedback = False
                     st.rerun()
