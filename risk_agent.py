@@ -6,6 +6,8 @@ import streamlit as st
 import pandas as pd
 import re
 import requests
+import re
+from github import Github # Make sure to import this at the top of your file!
 import rdflib
 from google.cloud import bigquery
 from google.oauth2 import service_account
