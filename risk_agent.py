@@ -186,14 +186,32 @@ if "db_history" not in st.session_state:
 
 with st.sidebar:
     st.header("🕒 Query History")
-    if st.button("🔄 Refresh History"):
+    if st.button("🔄 Sync with BigQuery", use_container_width=True):
         st.session_state.db_history = load_persistent_history()
     
+    st.markdown("---")
+    
+    # Iterate through the BigQuery history dataframe
     for idx, row in st.session_state.db_history.iterrows():
-        if st.button(f"🔍 {row['user_query'][:35]}...", key=f"hist_{idx}", use_container_width=True):
-            st.session_state.last_user_input = row['user_query']
+        # We use the full 'user_query' as the button label
+        # use_container_width=True ensures it expands to fill the sidebar
+        if st.button(row['user_query'], key=f"hist_{idx}", use_container_width=True):
+            
+            # 1. Update the Main Input bar
+            st.session_state.main_input = row['user_query']
+            
+            # 2. Update the SQL Editor with the saved logic
             st.session_state.sql_editor_key = row['generated_sql']
+            
+            # 3. Set 'last_user_input' to prevent the LLM from triggering again
+            st.session_state.last_user_input = row['user_query']
             st.session_state.original_generated_sql = row['generated_sql']
+            
+            # 4. Clear old results to avoid confusion
+            if "last_df" in st.session_state:
+                del st.session_state.last_df
+            
+            # Force Streamlit to redraw the UI with these new values
             st.rerun()
 
 # --- 6. MAIN WORKFLOW ---
