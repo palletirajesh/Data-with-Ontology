@@ -75,20 +75,19 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
     
     Did the user fix a table join, column mapping, or business jargon? 
     If YES, extract the new mapping as a valid JSON array of objects (using our bank ontology).
-    ONLY return the JSON array. Do not include explanations, greetings, or markdown backticks.
+    ONLY return the JSON array. Do not include explanations or markdown backticks.
     If NO, return exactly "MISMATCH".
     """
     response = call_groq_llm(evaluation_prompt) 
     
     if "MISMATCH" not in response:
         try:
-            # 1. Use Regex to safely extract only the JSON part, ignoring LLM conversational text
+            # 1. Safely extract JSON
             json_match = re.search(r'\[.*\]|\{.*\}', response, re.DOTALL)
             if not json_match:
                 raise ValueError("No valid JSON found in LLM response.")
                 
             new_knowledge_json = json.loads(json_match.group(0))
-            
             if isinstance(new_knowledge_json, dict):
                 new_knowledge_json = [new_knowledge_json]
                 
@@ -97,30 +96,43 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
                 item["dateAdded"] = today_str
                 item["reviewStatus"] = "Pending_Review"
             
-            # 2. NATIVE JSON HANDLING (Bypasses rdflib strictness)
-            file_path = "knowledge_base.jsonld"
+            # --- THE GITHUB FIX ---
+            # Make sure this matches the EXACT name of the file in your GitHub repo
+            file_path = "knowledge_base_23Ap_updated_v1.jsonld" 
             
-            with open(file_path, "r") as f:
-                kb_data = json.load(f)
+            # Connect to GitHub
+            g = Github(st.secrets["github"]["token"])
+            repo = g.get_repo(st.secrets["github"]["repo"])
             
-            # Append directly to the @graph array
+            # Fetch the current file from GitHub
+            contents = repo.get_contents(file_path)
+            kb_data = json.loads(contents.decoded_content.decode("utf-8"))
+            
+            # Append the new AI mappings to the @graph array
             if "@graph" in kb_data:
                 kb_data["@graph"].extend(new_knowledge_json)
             else:
                 kb_data["@graph"] = new_knowledge_json
                 
-            # Write back to file beautifully formatted
-            with open(file_path, "w") as f:
-                json.dump(kb_data, f, indent=2)
+            updated_json_str = json.dumps(kb_data, indent=2)
             
-            st.success(f"✅ Model successfully retrained! Changes flagged for review on {today_str}.")
-            time.sleep(10) # Pause so the user can actually read the success message
+            # Push the updated file BACK to GitHub
+            repo.update_file(
+                contents.path,
+                f"🤖 Agent Auto-Retrain: Updated Ontology on {today_str}",
+                updated_json_str,
+                contents.sha
+            )
+            # ------------------------
+            
+            st.success(f"✅ Model retrained! Changes pushed directly to GitHub for review.")
+            time.sleep(10)
             
         except json.JSONDecodeError:
             st.warning("Feedback loop skipped: AI did not return strictly valid JSON.")
             time.sleep(10)
         except Exception as e:
-            st.error(f"Error updating ontology: {e}")
+            st.error(f"Error pushing to GitHub: {e}")
             time.sleep(10)
 
 def build_context_string():
