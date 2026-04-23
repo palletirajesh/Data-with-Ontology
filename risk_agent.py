@@ -5,7 +5,6 @@ from datetime import date
 import streamlit as st
 import pandas as pd
 import re
-import re
 from github import Github # Make sure to import this at the top of your file!
 import requests
 import rdflib
@@ -67,94 +66,97 @@ def call_groq_llm(prompt):
         st.error(f"LLM Error: {response.text}")
         return ""
 
-import re # Add this import at the top of your file if not already there
+
 
 def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
-    """Evaluates user SQL edits and pushes learned logic to GitHub main branch."""
+    """Evaluates user SQL edits and pushes learned logic to GitHub."""
     
-    # We add a specific instruction to avoid markdown to help the parser
     evaluation_prompt = f"""
     The user asked: "{user_text}"
     The AI generated: "{original_sql}"
     The User corrected to: "{edited_sql}"
     
-    Did the user fix a table join, column mapping, or business jargon? 
-    If YES, extract the new mapping as a valid JSON array of objects using our bank ontology.
-    
-    STRICT DATA RULE: Return ONLY the raw JSON array string. 
-    NO markdown backticks, NO explanations, NO introductory text.
-    
-    If NO (irrelevant change), return exactly "MISMATCH".
+    Your task is to identify the NEW business jargon or mapping the user introduced.
+    Return a valid JSON array of objects following this exact format:
+    [
+      {{
+        "@id": "bank:Concept_UniqueName",
+        "@type": "bank:Concept",
+        "businessJargon": ["the new word used"],
+        "rdfs:comment": "Mapping extracted from user edit"
+      }}
+    ]
+
+    STRICT RULES:
+    1. Output ONLY the JSON array.
+    2. No markdown backticks (```).
+    3. No conversational text.
+    4. If no new jargon found, return "MISMATCH".
     """
     
     response = call_groq_llm(evaluation_prompt) 
     
     if "MISMATCH" not in response:
         try:
-            # --- IMPROVED EXTRACTION LOGIC ---
-            # 1. Strip out markdown code blocks if the LLM used them
-            clean_response = response.replace("```json", "").replace("```", "").strip()
+            # 1. Aggressive cleaning of the response
+            clean_response = response.strip()
+            # Remove markdown backticks if present
+            if clean_response.startswith("```"):
+                clean_response = re.sub(r'^```[a-z]*\n|```$', '', clean_response, flags=re.MULTILINE)
             
-            # 2. Use a more robust regex to find the first [ and the last ]
-            json_match = re.search(r'\[.*\]', clean_response, re.DOTALL)
-            
-            if not json_match:
-                # If it's not an array, check if it's a single object {}
-                json_match = re.search(r'\{.*\}', clean_response, re.DOTALL)
-            
-            if not json_match:
-                st.error("🤖 The AI didn't provide a valid JSON structure.")
-                with st.expander("See AI Raw Response"):
-                    st.text(response)
-                return
+            # 2. Extract strictly what is between the first [ and last ]
+            match = re.search(r'(\[.*\])', clean_response, re.DOTALL)
+            if match:
+                json_data = json.loads(match.group(1))
+            else:
+                # Try to see if it's a single object {} instead of an array []
+                match_obj = re.search(r'(\{.*\})', clean_response, re.DOTALL)
+                if match_obj:
+                    json_data = [json.loads(match_obj.group(1))]
+                else:
+                    raise ValueError(f"Could not find JSON structure in: {response[:100]}...")
 
-            new_knowledge_json = json.loads(json_match.group(0))
-            if isinstance(new_knowledge_json, dict):
-                new_knowledge_json = [new_knowledge_json]
-            # ----------------------------------
-
+            # Add Metadata
             today_str = date.today().isoformat()
-            for item in new_knowledge_json:
+            for item in json_data:
                 item["dateAdded"] = today_str
                 item["reviewStatus"] = "Pending_Review"
             
-            # GitHub Config
+            # --- GITHUB UPDATE ---
             token = st.secrets["github"]["token"]
             repo_path = "palletirajesh/Data-with-Ontology"
-            file_name = "knowledge_base.jsonld" 
+            file_name = "knowledge_base_23Ap.jsonld" 
             
             g = Github(token)
             repo = g.get_repo(repo_path)
-            
-            # Fetch from GitHub (ensures we aren't editing an old local copy)
             contents = repo.get_contents(file_name, ref="main")
             kb_data = json.loads(contents.decoded_content.decode("utf-8"))
             
-            # Merge and Push
+            # Append and Push
             if "@graph" in kb_data:
-                kb_data["@graph"].extend(new_knowledge_json)
+                kb_data["@graph"].extend(json_data)
             else:
-                kb_data["@graph"] = new_knowledge_json
+                kb_data["@graph"] = json_data
                 
             repo.update_file(
                 path=contents.path,
                 message=f"🤖 AI Retrain: {user_text[:30]}...",
                 content=json.dumps(kb_data, indent=2),
                 sha=contents.sha,
-                branch="main" # Strictly locking to main branch
+                branch="main"
             )
             
-            st.success("✅ Knowledge successfully pushed to GitHub main branch!")
-            time.sleep(10)
-            
-        except json.JSONDecodeError:
-            st.warning("⚠️ Feedback loop skipped: AI returned malformed JSON.")
-            with st.expander("View Malformed JSON for Debug"):
-                st.code(response)
-            time.sleep(10)
+            st.success("✅ Knowledge successfully pushed to GitHub!")
+            time.sleep(10) # Give you 3 seconds to see the success!
+
         except Exception as e:
-            st.error(f"❌ GitHub Sync Failed: {e}")
-            time.sleep(10)
+            # THIS IS THE FIX: We use a warning that stays on screen 
+            # and we DO NOT call st.rerun() if there is an error
+            st.error(f"❌ Feedback Loop Failed: {str(e)}")
+            with st.expander("Debug Raw Llama Response"):
+                st.code(response)
+            # Stop execution here so the error doesn't vanish
+            st.stop()
 
 def build_context_string():
     context = ""
