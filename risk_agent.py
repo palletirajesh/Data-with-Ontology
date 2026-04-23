@@ -134,14 +134,14 @@ def build_context_string():
     """Loads physical schema and full ontology for 100% logic accuracy."""
     context = ""
     try:
-        with open("database_schema_23ap.md", "r") as f:
+        with open("database_schema.md", "r") as f:
             # We use the whole file. No slicing.
             context += f"--- DATABASE SCHEMA ---\n{f.read()}\n\n"
     except Exception as e:
         st.warning(f"Schema file missing: {e}")
 
     try:
-        with open("knowledge_base_23Ap.jsonld", "r") as f:
+        with open("knowledge_base.jsonld", "r") as f:
             # Full ontology for the LLM to understand jargon
             context += f"--- ONTOLOGY & JARGON MAPPING ---\n{f.read()}\n"
     except Exception as e:
