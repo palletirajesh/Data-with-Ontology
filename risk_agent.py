@@ -272,3 +272,27 @@ if user_input:
 
         if "last_df" in st.session_state:
             st.dataframe(st.session_state.last_df, use_container_width=True)
+# --- 7. PROJECT SUMMARY FOOTER (Horizontal Row) ---
+st.markdown("---")
+
+f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
+
+with f_col1:
+    st.markdown("🖥️ **Streamlit**")
+    st.markdown("<p class='footer-text'>User Dashboard & Interface</p>", unsafe_allow_html=True)
+
+with f_col2:
+    st.markdown("🧠 **Groq / Together**")
+    st.markdown("<p class='footer-text'>Llama 3.3 Generative Brain</p>", unsafe_allow_html=True)
+
+with f_col3:
+    st.markdown("💾 **BigQuery**")
+    st.markdown("<p class='footer-text'>Enterprise Data Warehouse</p>", unsafe_allow_html=True)
+
+with f_col4:
+    st.markdown("📖 **GitHub/JSON-LD**")
+    st.markdown("<p class='footer-text'>Self-Learning Knowledge Base - Ontology</p>", unsafe_allow_html=True)
+
+with f_col5:
+    st.markdown("⚡ **Semantic Cache**")
+    st.markdown("<p class='footer-text'>NLP Memory Optimization - Remembering user queries for reuse</p>", unsafe_allow_html=True)
