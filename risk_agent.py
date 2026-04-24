@@ -49,7 +49,7 @@ def load_embedder():
 
 embedder = load_embedder()
 
-# --- 3. LLM ROUTER ---
+# --- 3. LLM ROUTER (Primary & Fallback) ---
 def call_llm_with_fallback(prompt):
     """Primary: Groq | Fallback: Together AI"""
     url_groq = "https://api.groq.com/openai/v1/chat/completions"
@@ -103,7 +103,6 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
             ontology_sample = f.read()
     except: ontology_sample = "Ontology file missing."
 
-    # Instruct the LLM to act as a Librarian for the graph
     prompt = f"""
     You are an Ontology Engineer for a Bank.
     User Question: "{user_text}"
@@ -113,11 +112,10 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
     TASK: Extract new business jargon or concept mappings based on the user's manual correction.
     
     ONTOLOGY RULES:
-    1. If the user fixed a filter value or column (e.g., 'Target' mapping to 'card_partner'), find the associated Concept.
+    1. If the user fixed a filter value or column, find the associated Concept.
     2. Add new jargon to the "bank:businessJargon" array of that Concept.
     3. Use "bank:" prefix for all IDs.
-    4. Follow the format of existing nodes:
-    {ontology_sample[:1500]}
+    4. Follow existing JSON-LD node structure.
     
     Return a raw JSON array of the nodes to be MERGED into the @graph. 
     If no significant logic changes, return: MISMATCH.
@@ -140,7 +138,6 @@ def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
         kb = json.loads(contents.decoded_content.decode("utf-8"))
         graph = kb.get("@graph", [])
 
-        # Merge nodes based on @id
         for n in new_nodes:
             n["dateAdded"] = date.today().isoformat()
             n["reviewStatus"] = "Pending_Review"
@@ -179,6 +176,18 @@ with st.sidebar:
 # --- 6. MAIN WORKFLOW ---
 st.title("🏦 Risk Data Agent")
 
+# --- ADDED: EXCEL DOWNLOAD OPTION ---
+try:
+    with open("additional_data.xlsx", "rb") as file:
+        st.download_button(
+            label="download data for this project",
+            data=file,
+            file_name="additional_data.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+except FileNotFoundError:
+    st.info("💡 Tip: Add 'additional_data.xlsx' to your repo to enable the project data download.")
+
 if "retrain_result" in st.session_state:
     res = st.session_state.retrain_result
     if res["status"] == "success": st.success(res["msg"])
@@ -186,7 +195,7 @@ if "retrain_result" in st.session_state:
     else: st.error(res["msg"])
     del st.session_state.retrain_result
 
-user_input = st.text_input("What data do you need?", key="main_input", placeholder="e.g. Amazon customers with late payments...")
+user_input = st.text_input("What risk data do you need?", key="main_input", placeholder="e.g. Amazon customers with late payments...")
 
 if user_input:
     st.session_state["last_user_input_preserved"] = user_input
