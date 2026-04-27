@@ -207,6 +207,50 @@
       ],
       "dateAdded": "2026-04-23",
       "reviewStatus": "Accepted"
+    },
+    {
+      "@id": "bank:HighRiskCardPartner",
+      "@type": "bank:Concept",
+      "bank:businessJargon": [
+        "High Risk",
+        "Subprime",
+        "Low Credit Score"
+      ],
+      "dateAdded": "2026-04-27",
+      "reviewStatus": "Pending_Review"
+    },
+    {
+      "@id": "bank:CardPartner",
+      "@type": "bank:Concept",
+      "bank:businessJargon": [
+        "Card Issuer",
+        "Card Provider",
+        "Partner Bank"
+      ],
+      "dateAdded": "2026-04-27",
+      "reviewStatus": "Pending_Review"
+    },
+    {
+      "@id": "bank:FICOScore",
+      "@type": "bank:Concept",
+      "bank:businessJargon": [
+        "Credit Score",
+        "FICO Rating",
+        "Credit Rating"
+      ],
+      "dateAdded": "2026-04-27",
+      "reviewStatus": "Pending_Review"
+    },
+    {
+      "@id": "bank:RiskAssessment",
+      "@type": "bank:Concept",
+      "bank:businessJargon": [
+        "Risk Evaluation",
+        "Credit Risk",
+        "Default Risk"
+      ],
+      "dateAdded": "2026-04-27",
+      "reviewStatus": "Pending_Review"
     }
   ]
 }
