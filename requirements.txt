@@ -2,10 +2,7 @@ streamlit
 pandas
 google-cloud-bigquery
 google-auth
-rdflib
 requests
 sentence-transformers
 pyarrow
 db-dtypes
-owlrl
-PyGithub
