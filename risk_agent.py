@@ -9,7 +9,7 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from sentence_transformers import SentenceTransformer
 
-from semantic_gateway import AccessDenied, GatewayError, SemanticGateway
+from semantic_gateway import GatewayError, SemanticGateway
 
 st.set_page_config(page_title="Risk Data Agent v2", page_icon="🏦", layout="wide")
 
@@ -17,7 +17,6 @@ GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 TOGETHER_API_KEY = st.secrets.get("TOGETHER_API_KEY1", "")
 BQ_PROJECT = st.secrets["bigquery"]["project_id"]
 BQ_DATASET = st.secrets["bigquery"]["dataset_id"]
-APP_ROLE = st.secrets.get("APP_ROLE", "RiskAnalyst")
 MAX_BYTES_BILLED = int(st.secrets.get("MAX_BYTES_BILLED", 1_000_000_000))
 HISTORY_TABLE = f"{BQ_PROJECT}.{BQ_DATASET}.query_history"
 
@@ -34,19 +33,18 @@ def load_embedder():
 
 
 @st.cache_resource
-def load_gateway(project, dataset, role):
+def load_gateway(project, dataset):
     return SemanticGateway(
         "knowledge_base.jsonld",
         "application_policy.json",
         load_embedder(),
         project,
-        dataset,
-        role,
+        dataset
     )
 
 
 bq_client = get_bq_client()
-gateway = load_gateway(BQ_PROJECT, BQ_DATASET, APP_ROLE)
+gateway = load_gateway(BQ_PROJECT, BQ_DATASET)
 
 
 def call_llm(prompt):
@@ -184,12 +182,10 @@ with st.sidebar:
         if st.button(row["user_query"], key=f"h{i}", width="stretch"):
             st.session_state.main_input = row["user_query"]
             st.rerun()
-    st.markdown("---")
-    st.caption(f"Application role: **{APP_ROLE}**")
 
 st.title("🏦 Risk Data Agent v2")
 st.caption(
-    "External LLM → logical intent only. Ontology, capability keys, authorization, joins and SQL stay inside the application boundary."
+    "External LLM → logical intent only. Ontology, capability keys, join rules and SQL stay inside the application boundary."
 )
 
 try:
@@ -204,11 +200,11 @@ user_input = st.text_input(
     placeholder="e.g. Amazon customers more than 30 days overdue...",
 )
 
-if st.button("Build & execute authorized query", type="primary", disabled=not bool(user_input)):
+if st.button("Build & execute validated query", type="primary", disabled=not bool(user_input)):
     try:
         with st.spinner("Creating logical intent without exposing metadata..."):
             intent = intent_from_prompt(user_input)
-        with st.spinner("Resolving ontology capabilities and policy..."):
+        with st.spinner("Resolving ontology capabilities and approved operators..."):
             compiled = gateway.compile(intent)
         with st.spinner("Dry-running and executing approved SQL..."):
             df, estimated = run_compiled(compiled)
@@ -218,8 +214,6 @@ if st.button("Build & execute authorized query", type="primary", disabled=not bo
         st.session_state.last_estimated = estimated
         save_history(user_input, compiled["sql"])
         st.session_state.history = load_history()
-    except AccessDenied as e:
-        st.error(f"Access denied: {e}")
     except GatewayError as e:
         st.error(f"Query blocked: {e}")
     except Exception as e:
@@ -231,7 +225,7 @@ if "last_compiled" in st.session_state:
         st.subheader("Application decision")
         st.caption("Logical intent from external LLM")
         st.json(st.session_state.last_intent)
-        st.caption("Internally authorized capabilities")
+        st.caption("Internally resolved capabilities")
         for cap in st.session_state.last_compiled["capabilities"]:
             st.code(f"{cap['key']} | {cap['column']} | {cap['classification']}", language=None)
         st.metric("Dry-run bytes", f"{st.session_state.last_estimated:,}")
@@ -250,7 +244,7 @@ c1, c2, c3, c4, c5 = st.columns(5)
 for col, title, desc in [
     (c1, "External LLM", "Language → intent"),
     (c2, "Ontology", "Local semantic resolution"),
-    (c3, "Capability Gate", "Role + operator policy"),
+    (c3, "Capability Gate", "Approved concepts + operators"),
     (c4, "SQL Compiler", "Deterministic + parameterized"),
     (c5, "BigQuery", "Dry-run + bounded execution"),
 ]:
