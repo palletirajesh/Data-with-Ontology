@@ -1,298 +1,259 @@
-import os
-import time
 import json
 import re
-import logging
-from datetime import datetime, date
-import streamlit as st
+from datetime import datetime
+
 import pandas as pd
 import requests
-from github import Github, Auth
+import streamlit as st
 from google.cloud import bigquery
 from google.oauth2 import service_account
-from sentence_transformers import SentenceTransformer, util
+from sentence_transformers import SentenceTransformer
 
-# --- 0. SUPPRESS LOG NOISE ---
-# Silences the torchvision/transformers noise from your logs
-logging.getLogger("transformers").setLevel(logging.ERROR)
-logging.getLogger("torch").setLevel(logging.ERROR)
+from semantic_gateway import AccessDenied, GatewayError, SemanticGateway
 
-# --- 1. CONFIG & STYLE ---
-st.set_page_config(page_title="Risk Data Agent", page_icon="🏦", layout="wide")
+st.set_page_config(page_title="Risk Data Agent v2", page_icon="🏦", layout="wide")
 
-st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
-    html, body, [class*="st-"] { font-family: 'Inter', sans-serif; }
-    .stButton>button { border-radius: 5px; height: 3em; background-color: #007bff; color: white; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# Secrets
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-TOGETHER_API_KEY = st.secrets.get("TOGETHER_API_KEY1", "") 
+TOGETHER_API_KEY = st.secrets.get("TOGETHER_API_KEY1", "")
 BQ_PROJECT = st.secrets["bigquery"]["project_id"]
 BQ_DATASET = st.secrets["bigquery"]["dataset_id"]
+APP_ROLE = st.secrets.get("APP_ROLE", "RiskAnalyst")
+MAX_BYTES_BILLED = int(st.secrets.get("MAX_BYTES_BILLED", 1_000_000_000))
 HISTORY_TABLE = f"{BQ_PROJECT}.{BQ_DATASET}.query_history"
 
-# --- 2. ENGINES ---
+
 def get_bq_client():
     info = st.secrets["gcp_service_account"]
-    credentials = service_account.Credentials.from_service_account_info(info)
-    return bigquery.Client(credentials=credentials, project=info["project_id"])
+    creds = service_account.Credentials.from_service_account_info(info)
+    return bigquery.Client(credentials=creds, project=info["project_id"])
 
-bq_client = get_bq_client()
 
 @st.cache_resource
 def load_embedder():
-    return SentenceTransformer('all-MiniLM-L6-v2')
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
-embedder = load_embedder()
 
-# --- 3. LLM ROUTER (Primary & Fallback) ---
-def call_llm_with_fallback(prompt):
-    """Primary: Groq | Fallback: Together AI"""
-    url_groq = "https://api.groq.com/openai/v1/chat/completions"
-    headers_groq = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "temperature": 0.0}
-    
-    try:
-        res = requests.post(url_groq, headers=headers_groq, json=payload, timeout=12)
-        if res.status_code == 200: return res.json()["choices"][0]["message"]["content"]
-    except: pass
+@st.cache_resource
+def load_gateway(project, dataset, role):
+    return SemanticGateway(
+        "knowledge_base.jsonld",
+        "application_policy.json",
+        load_embedder(),
+        project,
+        dataset,
+        role,
+    )
 
-    if not TOGETHER_API_KEY: return ""
-    url_tog = "https://api.together.xyz/v1/chat/completions"
-    headers_tog = {"Authorization": f"Bearer {TOGETHER_API_KEY}", "Content-Type": "application/json"}
-    payload_tog = {"model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "messages": [{"role": "user", "content": prompt}], "temperature": 0.0}
-    
-    try:
-        res_tog = requests.post(url_tog, headers=headers_tog, json=payload_tog, timeout=15)
-        return res_tog.json()["choices"][0]["message"]["content"] if res_tog.status_code == 200 else ""
-    except: return ""
 
-# --- 4. CORE FUNCTIONS ---
+bq_client = get_bq_client()
+gateway = load_gateway(BQ_PROJECT, BQ_DATASET, APP_ROLE)
 
-def load_persistent_history():
-    try:
-        query = f"SELECT user_query, generated_sql FROM `{HISTORY_TABLE}` ORDER BY timestamp DESC LIMIT 25"
-        return bq_client.query(query).to_dataframe()
-    except: return pd.DataFrame(columns=["user_query", "generated_sql"])
 
-def save_query_to_db(user_text, sql):
-    try:
-        rows = [{"user_query": user_text, "generated_sql": sql, "timestamp": datetime.now().isoformat()}]
-        bq_client.insert_rows_json(HISTORY_TABLE, rows)
-    except: pass
+def call_llm(prompt):
+    """The external LLM receives user language only, never database/ontology metadata."""
+    providers = [
+        (
+            "https://api.groq.com/openai/v1/chat/completions",
+            GROQ_API_KEY,
+            "llama-3.3-70b-versatile",
+            12,
+        )
+    ]
+    if TOGETHER_API_KEY:
+        providers.append(
+            (
+                "https://api.together.xyz/v1/chat/completions",
+                TOGETHER_API_KEY,
+                "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                15,
+            )
+        )
+    for url, key, model, timeout in providers:
+        try:
+            r = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.0,
+                },
+                timeout=timeout,
+            )
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"]
+        except requests.RequestException:
+            pass
+    raise GatewayError("No language-model provider returned a valid intent.")
 
-def build_context_string():
-    context = ""
-    try:
-        with open("database_schema.md", "r") as f: context += f"--- SCHEMA ---\n{f.read()}\n\n"
-        with open("knowledge_base.jsonld", "r") as f: context += f"--- ONTOLOGY ---\n{f.read()}\n"
-    except: pass
-    return context
 
-def evaluate_and_update_ontology(user_text, original_sql, edited_sql):
-    """
-    Architectural Retraining:
-    Links User Terms -> businessJargon -> bank:Concept -> bank:Column
-    """
-    try:
-        with open("knowledge_base.jsonld", "r") as f:
-            ontology_sample = f.read()
-    except: ontology_sample = "Ontology file missing."
-
+def intent_from_prompt(user_text):
     prompt = f"""
-    You are an Ontology Engineer for a Bank.
-    User Question: "{user_text}"
-    Original AI SQL: {original_sql}
-    User Corrected SQL: {edited_sql}
-    
-    TASK: Extract new business jargon or concept mappings based on the user's manual correction.
-    
-    ONTOLOGY RULES:
-    1. If the user fixed a filter value or column, find the associated Concept.
-    2. Add new jargon to the "bank:businessJargon" array of that Concept.
-    3. Use "bank:" prefix for all IDs.
-    4. Follow existing JSON-LD node structure.
-    
-    Return a raw JSON array of the nodes to be MERGED into the @graph. 
-    If no significant logic changes, return: MISMATCH.
-    """
-    
-    response = call_llm_with_fallback(prompt)
-    if not response or "MISMATCH" in response.upper():
-        return {"status": "warning", "msg": "Retrain Skipped: No business logic change detected."}
+You are only a language parser. You do not know the database schema, table names,
+column names, joins, ontology, capability keys, credentials, project, or dataset.
+Never generate SQL and never invent database metadata.
 
+Return ONLY a JSON object:
+{{
+  "operation": "retrieve" or "count",
+  "requested_attributes": ["ordinary business phrase"],
+  "filters": [{{"field":"ordinary business phrase","operator":"eq|ne|gt|gte|lt|lte|in|contains|between","value":"literal/number/boolean/date/array"}}]
+}}
+
+Rules:
+- Use phrases from the request or plain-language equivalents.
+- Do not return physical database identifiers or SQL fragments.
+- Do not invent numeric thresholds.
+- "how many" means operation=count.
+- late/overdue payments without a number means payment delay > 0.
+- a brand such as Amazon is a filter value; describe its field generically as retail partner.
+- keep requested_attributes minimal; filter fields need not be repeated there.
+
+User request: {json.dumps(user_text)}
+"""
+    raw = call_llm(prompt).replace("```json", "").replace("```", "").strip()
     try:
-        clean = response.replace("```json", "").replace("```", "").strip()
-        match = re.search(r'\[.*\]', clean, re.DOTALL)
-        if not match: return {"status": "error", "msg": "AI generated invalid JSON graph nodes."}
-        
-        new_nodes = json.loads(match.group(0))
-        auth = Auth.Token(st.secrets["github"]["token"])
-        g = Github(auth=auth)
-        repo = g.get_repo(st.secrets["github"]["repo"])
-        contents = repo.get_contents("knowledge_base.jsonld", ref="main")
-        kb = json.loads(contents.decoded_content.decode("utf-8"))
-        graph = kb.get("@graph", [])
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", raw, re.S)
+        if not match:
+            raise GatewayError("The language model returned invalid logical intent.")
+        obj = json.loads(match.group(0))
+    if not isinstance(obj, dict):
+        raise GatewayError("Logical intent must be a JSON object.")
+    return obj
 
-        for n in new_nodes:
-            n["dateAdded"] = date.today().isoformat()
-            n["reviewStatus"] = "Pending_Review"
-            found = False
-            for existing in graph:
-                if existing.get("@id") == n.get("@id"):
-                    if "bank:businessJargon" in n and "bank:businessJargon" in existing:
-                        existing["bank:businessJargon"] = list(set(existing["bank:businessJargon"]) | set(n["bank:businessJargon"]))
-                    existing.update({k: v for k, v in n.items() if k != "bank:businessJargon"})
-                    found = True; break
-            if not found: graph.append(n)
 
-        kb["@graph"] = graph
-        repo.update_file(contents.path, f"🧠 Knowledge Loop: {user_text[:20]}", json.dumps(kb, indent=2), contents.sha, branch="main")
-        return {"status": "success", "msg": "Ontology synchronized with GitHub!"}
-    except Exception as e:
-        return {"status": "error", "msg": f"GitHub Push Failed: {e}"}
+def query_parameters(specs):
+    out = []
+    for p in specs:
+        if p.get("array"):
+            out.append(bigquery.ArrayQueryParameter(p["name"], p["type"], p["value"]))
+        else:
+            out.append(bigquery.ScalarQueryParameter(p["name"], p["type"], p["value"]))
+    return out
 
-# --- 5. SIDEBAR ---
-if "db_history" not in st.session_state:
-    st.session_state.db_history = load_persistent_history()
+
+def run_compiled(compiled):
+    params = query_parameters(compiled["parameters"])
+    dry_cfg = bigquery.QueryJobConfig(
+        dry_run=True,
+        use_query_cache=False,
+        query_parameters=params,
+        maximum_bytes_billed=MAX_BYTES_BILLED,
+    )
+    dry = bq_client.query(compiled["sql"], job_config=dry_cfg)
+    exec_cfg = bigquery.QueryJobConfig(
+        query_parameters=params,
+        maximum_bytes_billed=MAX_BYTES_BILLED,
+    )
+    df = bq_client.query(compiled["sql"], job_config=exec_cfg).result(timeout=30).to_dataframe(
+        create_bqstorage_client=False
+    )
+    return df, int(dry.total_bytes_processed or 0)
+
+
+def load_history():
+    try:
+        return bq_client.query(
+            f"SELECT user_query, generated_sql FROM `{HISTORY_TABLE}` ORDER BY timestamp DESC LIMIT 25"
+        ).to_dataframe()
+    except Exception:
+        return pd.DataFrame(columns=["user_query", "generated_sql"])
+
+
+def save_history(user_text, sql):
+    try:
+        bq_client.insert_rows_json(
+            HISTORY_TABLE,
+            [{"user_query": user_text, "generated_sql": sql, "timestamp": datetime.now().isoformat()}],
+        )
+    except Exception:
+        pass
+
+
+if "history" not in st.session_state:
+    st.session_state.history = load_history()
 
 with st.sidebar:
-    st.header("🕒 History")
-    if st.button("🔄 Sync History", width='stretch'):
-        st.session_state.db_history = load_persistent_history()
-    
-    for idx, row in st.session_state.db_history.iterrows():
-        if st.button(row['user_query'], key=f"h_{idx}", width='stretch'):
-            st.session_state.main_input = row['user_query']
-            st.session_state.sql_editor_key = row['generated_sql']
-            st.session_state.last_user_input = row['user_query']
-            st.session_state.original_generated_sql = row['generated_sql']
+    st.header("Query history")
+    st.caption("History is informational; executable SQL is never reused.")
+    if st.button("Sync history", width="stretch"):
+        st.session_state.history = load_history()
+    for i, row in st.session_state.history.iterrows():
+        if st.button(row["user_query"], key=f"h{i}", width="stretch"):
+            st.session_state.main_input = row["user_query"]
             st.rerun()
+    st.markdown("---")
+    st.caption(f"Application role: **{APP_ROLE}**")
 
-# --- 6. MAIN WORKFLOW ---
-st.title("🏦 Risk Data Agent")
+st.title("🏦 Risk Data Agent v2")
+st.caption(
+    "External LLM → logical intent only. Ontology, capability keys, authorization, joins and SQL stay inside the application boundary."
+)
 
-# --- ADDED: EXCEL DOWNLOAD OPTION ---
 try:
-    with open("additional_data.xlsx", "rb") as file:
-        st.download_button(
-            label="download data for this project",
-            data=file,
-            file_name="additional_data.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+    with open("additional_data.xlsx", "rb") as f:
+        st.download_button("Download project data", f, "additional_data.xlsx")
 except FileNotFoundError:
-    st.info("💡 Tip: Add 'additional_data.xlsx' to your repo to enable the project data download.")
+    pass
 
-if "retrain_result" in st.session_state:
-    res = st.session_state.retrain_result
-    if res["status"] == "success": st.success(res["msg"])
-    elif res["status"] == "warning": st.warning(res["msg"])
-    else: st.error(res["msg"])
-    del st.session_state.retrain_result
+user_input = st.text_input(
+    "What risk data do you need?",
+    key="main_input",
+    placeholder="e.g. Amazon customers more than 30 days overdue...",
+)
 
-user_input = st.text_input("What risk data do you need?", key="main_input", placeholder="e.g. Amazon customers with late payments...")
+if st.button("Build & execute authorized query", type="primary", disabled=not bool(user_input)):
+    try:
+        with st.spinner("Creating logical intent without exposing metadata..."):
+            intent = intent_from_prompt(user_input)
+        with st.spinner("Resolving ontology capabilities and policy..."):
+            compiled = gateway.compile(intent)
+        with st.spinner("Dry-running and executing approved SQL..."):
+            df, estimated = run_compiled(compiled)
+        st.session_state.last_intent = intent
+        st.session_state.last_compiled = compiled
+        st.session_state.last_df = df
+        st.session_state.last_estimated = estimated
+        save_history(user_input, compiled["sql"])
+        st.session_state.history = load_history()
+    except AccessDenied as e:
+        st.error(f"Access denied: {e}")
+    except GatewayError as e:
+        st.error(f"Query blocked: {e}")
+    except Exception as e:
+        st.error(f"Query execution failed: {e}")
 
-if user_input:
-    st.session_state["last_user_input_preserved"] = user_input
-    col_sql, col_res = st.columns([1, 1.5])
-    
-    with col_sql:
-        if "last_user_input" not in st.session_state or st.session_state.last_user_input != user_input:
-            # Semantic Cache
-            cached_sql = None
-            if not st.session_state.db_history.empty:
-                scores = util.cos_sim(embedder.encode(user_input), embedder.encode(st.session_state.db_history['user_query'].tolist()))[0]
-                if scores.max() > 0.94: cached_sql = st.session_state.db_history.iloc[scores.argmax().item()]['generated_sql']
+if "last_compiled" in st.session_state:
+    left, right = st.columns([1, 1.5])
+    with left:
+        st.subheader("Application decision")
+        st.caption("Logical intent from external LLM")
+        st.json(st.session_state.last_intent)
+        st.caption("Internally authorized capabilities")
+        for cap in st.session_state.last_compiled["capabilities"]:
+            st.code(f"{cap['key']} | {cap['column']} | {cap['classification']}", language=None)
+        st.metric("Dry-run bytes", f"{st.session_state.last_estimated:,}")
+    with right:
+        st.subheader("Deterministic SQL")
+        st.caption("Read-only. Users and external LLMs cannot edit executable SQL.")
+        st.code(st.session_state.last_compiled["sql"], language="sql")
+        if st.session_state.last_compiled["parameters"]:
+            st.caption("Bound parameters")
+            st.json(st.session_state.last_compiled["parameters"])
+        st.subheader("Results")
+        st.dataframe(st.session_state.last_df, use_container_width=True)
 
-            if cached_sql:
-                st.toast("⚡ Reusing Logic from Cache")
-                final_sql = cached_sql
-            else:
-                with st.spinner("Synthesizing Logic (Strict Rules Applied)..."):
-                    context = build_context_string()
-                    full_path = f"{BQ_PROJECT}.{BQ_DATASET}"
-                    
-                    # --- THE 19 RULES PROMPT ---
-                    system_prompt = (
-                        "You are a BigQuery SQL Expert.\n\nContext:\n" + context + "\n\n"
-                        "STRICT RULES:\n"
-                        "1. ONLY use Tables/Columns in Context.\n"
-                        "2. NEVER USE 'SELECT *'. Explicitly name columns.\n"
-                        "3. DEFAULT COLUMNS: Always select: `cust_id`, `customer_name`, `card_id`.\n"
-                        "4. DYNAMIC COLUMNS: Select columns relating to user conditions.\n"
-                        "5. PROACTIVE JOINS: Write JOINs for required tables.\n"
-                        "7. NO PARENTHESES: Never put () after table names.\n"
-                        "8. Use MANDATORY JOINs exactly.\n"
-                        "9. Output ONLY raw SQL code.\n"
-                        "10. If missing, output: 'I cannot answer this with available data.'\n"
-                        "11. dim_customer is the bridge table.\n"
-                        f"12. Prefix tables with: `{full_path}.`\n"
-                        "15. For filters, use: UPPER(column) = UPPER('value'). (e.g. UPPER(t1.card_partner) = UPPER('Target'))\n"
-                        "16. Apply BUSINESS TRANSLATION RULES strictly.\n"
-                        "17. Any column in WHERE/HAVING must be in SELECT.\n"
-                        "18. Return detailed records unless summary keywords are used.\n"
-                        "19. Assign short aliases (t1, t2) and prefix EVERY column.\n\n"
-                        f"Write BigQuery SQL for: \"{user_input}\""
-                    )
-                    final_sql = call_llm_with_fallback(system_prompt).replace("```sql", "").replace("```", "").strip()
-                    if "SELECT" in final_sql.upper():
-                        save_query_to_db(user_input, final_sql)
-            
-            st.session_state.last_user_input = user_input
-            st.session_state.original_generated_sql = final_sql
-            st.session_state.sql_editor_key = final_sql
-            st.session_state.pending_feedback = False
-
-        with st.form("sql_form"):
-            user_sql = st.text_area("SQL Preview:", value=st.session_state.get('sql_editor_key', ''), height=250)
-            if st.form_submit_button("▶️ Execute"):
-                try:
-                    job = bq_client.query(user_sql)
-                    st.session_state.last_df = job.result(timeout=30).to_dataframe(create_bqstorage_client=False)
-                    if user_sql.strip() != st.session_state.original_generated_sql.strip():
-                        st.session_state.pending_feedback = True
-                        st.session_state.edited_sql_for_feedback = user_sql
-                except Exception as e: st.error(f"BQ Error: {e}")
-
-    with col_res:
-        if st.session_state.get("pending_feedback"):
-            st.info("💡 **Retrain model with your SQL edits?**")
-            if st.button("🧠 Yes, Retrain", width='stretch'):
-                _q = st.session_state.get("last_user_input_preserved", "")
-                _o = st.session_state.original_generated_sql
-                _e = st.session_state.edited_sql_for_feedback
-                st.session_state.retrain_result = evaluate_and_update_ontology(_q, _o, _e)
-                st.session_state.pending_feedback = False
-                st.rerun()
-
-        if "last_df" in st.session_state:
-            st.dataframe(st.session_state.last_df, use_container_width=True)
-# --- 7. PROJECT SUMMARY FOOTER (Horizontal Row) ---
 st.markdown("---")
-
-f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
-
-with f_col1:
-    st.markdown("🖥️ **Streamlit**")
-    st.markdown("<p class='footer-text'>User Dashboard & Interface</p>", unsafe_allow_html=True)
-
-with f_col2:
-    st.markdown("🧠 **Groq / Together**")
-    st.markdown("<p class='footer-text'>Llama 3.3 Generative Brain</p>", unsafe_allow_html=True)
-
-with f_col3:
-    st.markdown("💾 **BigQuery**")
-    st.markdown("<p class='footer-text'>Enterprise Data Warehouse</p>", unsafe_allow_html=True)
-
-with f_col4:
-    st.markdown("📖 **GitHub/JSON-LD**")
-    st.markdown("<p class='footer-text'>Self-Learning Knowledge Base - Ontology</p>", unsafe_allow_html=True)
-
-with f_col5:
-    st.markdown("⚡ **Semantic Cache**")
-    st.markdown("<p class='footer-text'>NLP Memory Optimization - Remembering user queries for reuse</p>", unsafe_allow_html=True)
+c1, c2, c3, c4, c5 = st.columns(5)
+for col, title, desc in [
+    (c1, "External LLM", "Language → intent"),
+    (c2, "Ontology", "Local semantic resolution"),
+    (c3, "Capability Gate", "Role + operator policy"),
+    (c4, "SQL Compiler", "Deterministic + parameterized"),
+    (c5, "BigQuery", "Dry-run + bounded execution"),
+]:
+    with col:
+        st.markdown(f"**{title}**")
+        st.caption(desc)
