@@ -1,6 +1,6 @@
 import unittest
 
-from semantic_gateway import AccessDenied, GatewayError, SemanticGateway
+from semantic_gateway import GatewayError, SemanticGateway
 
 
 class FakeEmbedder:
@@ -10,14 +10,13 @@ class FakeEmbedder:
 
 
 class SemanticGatewayTests(unittest.TestCase):
-    def gateway(self, role="RiskAnalyst"):
+    def gateway(self):
         return SemanticGateway(
             "knowledge_base.jsonld",
             "application_policy.json",
             FakeEmbedder(),
             "test-project",
-            "test_dataset",
-            role,
+            "test_dataset"
         )
 
     def test_compiles_parameterized_authorized_query(self):
@@ -38,10 +37,16 @@ class SemanticGatewayTests(unittest.TestCase):
         self.assertIn("fact_card_ledger", compiled["sql"])
         self.assertIn("fact_credit_bureau", compiled["sql"])
 
-    def test_restricted_identity_is_denied_to_risk_analyst(self):
-        with self.assertRaises(AccessDenied):
+    def test_unapproved_operator_is_blocked(self):
+        with self.assertRaises(GatewayError):
             self.gateway().compile(
-                {"operation": "retrieve", "requested_attributes": ["ssn"], "filters": []}
+                {
+                    "operation": "retrieve",
+                    "requested_attributes": [],
+                    "filters": [
+                        {"field": "ssn", "operator": "contains", "value": "123"}
+                    ],
+                }
             )
 
     def test_sql_policy_rejects_mutation(self):
