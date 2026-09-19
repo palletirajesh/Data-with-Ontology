@@ -32,8 +32,10 @@ class SemanticGateway:
     """Trusted local layer: ontology -> capability -> policy -> deterministic SQL."""
 
     def __init__(self, ontology_path, policy_path, embedder, project, dataset, role):
-        self.kb = json.load(open(ontology_path, encoding="utf-8"))
-        self.policy = json.load(open(policy_path, encoding="utf-8"))
+        with open(ontology_path, encoding="utf-8") as f:
+            self.kb = json.load(f)
+        with open(policy_path, encoding="utf-8") as f:
+            self.policy = json.load(f)
         self.embedder = embedder
         self.project, self.dataset, self.role = project, dataset, role
         self.nodes = {n.get("@id"): n for n in self.kb.get("@graph", []) if n.get("@id")}
