@@ -8,10 +8,6 @@ class GatewayError(ValueError):
     pass
 
 
-class AccessDenied(GatewayError):
-    pass
-
-
 def _list(v):
     return v if isinstance(v, list) else ([] if v is None else [v])
 
@@ -31,13 +27,13 @@ def capability_key(ontology_id):
 class SemanticGateway:
     """Trusted local layer: ontology -> capability -> policy -> deterministic SQL."""
 
-    def __init__(self, ontology_path, policy_path, embedder, project, dataset, role):
+    def __init__(self, ontology_path, policy_path, embedder, project, dataset):
         with open(ontology_path, encoding="utf-8") as f:
             self.kb = json.load(f)
         with open(policy_path, encoding="utf-8") as f:
             self.policy = json.load(f)
         self.embedder = embedder
-        self.project, self.dataset, self.role = project, dataset, role
+        self.project, self.dataset = project, dataset
         self.nodes = {n.get("@id"): n for n in self.kb.get("@graph", []) if n.get("@id")}
         self.root = self.policy["root_table"]
         self.col_table, self.joins = {}, {}
@@ -112,11 +108,11 @@ class SemanticGateway:
         root = [k for k in keys if self.caps[k]["table"] == self.root]
         return self.caps[(root or keys)[0]]
 
-    def _authorize(self, cap, operator=None):
-        if self.role not in cap["roles"]:
-            raise AccessDenied(f"Role {self.role} cannot access {cap['column']} ({cap['key']}).")
+    def _validate_capability(self, cap, operator=None):
         if operator and operator not in cap["operators"]:
-            raise AccessDenied(f"Operator {operator} is not allowed for {cap['column']}.")
+            raise GatewayError(
+                f"Operator {operator} is not approved for capability {cap['key']}."
+            )
 
     def _path(self, target):
         if target == self.root:
@@ -144,14 +140,14 @@ class SemanticGateway:
         for attr in intent.get("requested_attributes", []):
             if _norm(attr) in generic:
                 continue
-            cap = self.resolve(attr); self._authorize(cap)
+            cap = self.resolve(attr); self._validate_capability(cap)
             if cap["key"] not in {x["key"] for x in selected}:
                 selected.append(cap)
 
         filters = []
         for f in intent.get("filters", []):
             cap = self.resolve(f.get("field", "")); op = f.get("operator", "eq")
-            self._authorize(cap, op)
+            self._validate_capability(cap, op)
             if "value" not in f:
                 raise GatewayError(f"Missing value for {f.get('field')}.")
             filters.append((cap, op, f["value"]))
@@ -159,7 +155,7 @@ class SemanticGateway:
                 selected.append(cap)
 
         for cap in selected:
-            self._authorize(cap)
+            self._validate_capability(cap)
         tables = {c["table"] for c in selected}
         edges = []
         for t in tables:
