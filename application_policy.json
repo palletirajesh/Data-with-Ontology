@@ -2,14 +2,179 @@
   "root_table": "bank:dim_customer",
   "semantic_threshold": 0.62,
   "capabilities": [
-    {"ontology_id":"bank:col_cust_id","column":"cust_id","type":"STRING","classification":"INTERNAL","roles":["RiskAnalyst","RiskManager","Admin"],"operators":["eq","ne","in","contains"],"aliases":["customer id","cust id","client id"],"default":true},
-    {"ontology_id":"bank:col_customer_name","column":"customer_name","type":"STRING","classification":"PII_BASIC","roles":["RiskAnalyst","RiskManager","Admin"],"operators":["eq","ne","in","contains"],"aliases":["customer name","client name","name"],"default":true},
-    {"ontology_id":"bank:col_card_id_cust","column":"card_id","type":"STRING","classification":"INTERNAL","roles":["RiskAnalyst","RiskManager","Admin"],"operators":["eq","ne","in","contains"],"aliases":["card id","card number","account number"],"default":true},
-    {"ontology_id":"bank:col_days_past_due","type":"INT64","classification":"INTERNAL","roles":["RiskAnalyst","RiskManager","Admin"],"operators":["eq","ne","gt","gte","lt","lte","between","in"],"aliases":["late payment","late payments","overdue","payment delay","days past due","delinquent"]},
-    {"ontology_id":"bank:col_used_amount","type":"FLOAT64","classification":"INTERNAL","roles":["RiskAnalyst","RiskManager","Admin"],"operators":["eq","ne","gt","gte","lt","lte","between","in"],"aliases":["enr","balance","used amount","debt","usage"]},
-    {"ontology_id":"bank:col_unutilized_amount","type":"FLOAT64","classification":"INTERNAL","roles":["RiskAnalyst","RiskManager","Admin"],"operators":["eq","ne","gt","gte","lt","lte","between","in"],"aliases":["osuc","available credit","unutilized amount"]},
-    {"ontology_id":"bank:col_card_partner","type":"STRING","classification":"INTERNAL","roles":["RiskAnalyst","RiskManager","Admin"],"operators":["eq","ne","in","contains"],"aliases":["retail partner","card partner","partner","card issuer","card provider"]},
-    {"ontology_id":"bank:col_fico_score","type":"INT64","classification":"SENSITIVE","roles":["RiskAnalyst","RiskManager","Admin"],"operators":["eq","ne","gt","gte","lt","lte","between","in"],"aliases":["fico","fico score","credit score","credit rating"]},
-    {"ontology_id":"bank:col_ssn_hash","type":"STRING","classification":"RESTRICTED","roles":["RiskManager","Admin"],"operators":["eq","ne","in"],"aliases":["ssn","sin","social insurance number","identity number"]}
+    {
+      "ontology_id": "bank:col_cust_id",
+      "column": "cust_id",
+      "type": "STRING",
+      "classification": "INTERNAL",
+      "operators": [
+        "eq",
+        "ne",
+        "in",
+        "contains"
+      ],
+      "aliases": [
+        "customer id",
+        "cust id",
+        "client id"
+      ],
+      "default": true
+    },
+    {
+      "ontology_id": "bank:col_customer_name",
+      "column": "customer_name",
+      "type": "STRING",
+      "classification": "PII_BASIC",
+      "operators": [
+        "eq",
+        "ne",
+        "in",
+        "contains"
+      ],
+      "aliases": [
+        "customer name",
+        "client name",
+        "name"
+      ],
+      "default": true
+    },
+    {
+      "ontology_id": "bank:col_card_id_cust",
+      "column": "card_id",
+      "type": "STRING",
+      "classification": "INTERNAL",
+      "operators": [
+        "eq",
+        "ne",
+        "in",
+        "contains"
+      ],
+      "aliases": [
+        "card id",
+        "card number",
+        "account number"
+      ],
+      "default": true
+    },
+    {
+      "ontology_id": "bank:col_days_past_due",
+      "type": "INT64",
+      "classification": "INTERNAL",
+      "operators": [
+        "eq",
+        "ne",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between",
+        "in"
+      ],
+      "aliases": [
+        "late payment",
+        "late payments",
+        "overdue",
+        "payment delay",
+        "days past due",
+        "delinquent"
+      ]
+    },
+    {
+      "ontology_id": "bank:col_used_amount",
+      "type": "FLOAT64",
+      "classification": "INTERNAL",
+      "operators": [
+        "eq",
+        "ne",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between",
+        "in"
+      ],
+      "aliases": [
+        "enr",
+        "balance",
+        "used amount",
+        "debt",
+        "usage"
+      ]
+    },
+    {
+      "ontology_id": "bank:col_unutilized_amount",
+      "type": "FLOAT64",
+      "classification": "INTERNAL",
+      "operators": [
+        "eq",
+        "ne",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between",
+        "in"
+      ],
+      "aliases": [
+        "osuc",
+        "available credit",
+        "unutilized amount"
+      ]
+    },
+    {
+      "ontology_id": "bank:col_card_partner",
+      "type": "STRING",
+      "classification": "INTERNAL",
+      "operators": [
+        "eq",
+        "ne",
+        "in",
+        "contains"
+      ],
+      "aliases": [
+        "retail partner",
+        "card partner",
+        "partner",
+        "card issuer",
+        "card provider"
+      ]
+    },
+    {
+      "ontology_id": "bank:col_fico_score",
+      "type": "INT64",
+      "classification": "SENSITIVE",
+      "operators": [
+        "eq",
+        "ne",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between",
+        "in"
+      ],
+      "aliases": [
+        "fico",
+        "fico score",
+        "credit score",
+        "credit rating"
+      ]
+    },
+    {
+      "ontology_id": "bank:col_ssn_hash",
+      "type": "STRING",
+      "classification": "RESTRICTED",
+      "operators": [
+        "eq",
+        "ne",
+        "in"
+      ],
+      "aliases": [
+        "ssn",
+        "sin",
+        "social insurance number",
+        "identity number"
+      ]
+    }
   ]
 }
