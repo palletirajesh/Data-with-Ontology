@@ -18,7 +18,7 @@ The external LLM never receives JSON-LD, table names, column names, joins, proje
 
 ## Application-layer keys
 
-`application_policy.json` is the private application binding layer. Each approved ontology column gets a deterministic internal key:
+`application_policy.json` is the application-side binding layer. Each approved ontology column gets a deterministic internal key:
 
 ```text
 CAP_<first 12 hex characters of SHA256(ontology-column-id)>
@@ -58,7 +58,7 @@ The application resolves those phrases locally and creates the SQL. Users and ex
 
 - `risk_agent.py` — Streamlit UI and external intent boundary.
 - `semantic_gateway.py` — local resolver, capability gate, join planner and SQL compiler.
-- `application_policy.json` — private physical/access policy bound to JSON-LD IDs.
+- `application_policy.json` — application-side physical/access policy bound to JSON-LD IDs.
 - `knowledge_base.jsonld` — ontology and approved relationships.
 - `database_schema.md` — documentation only; no longer sent to the LLM.
 
