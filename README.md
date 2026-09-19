@@ -1,6 +1,6 @@
 # Risk Data Agent v2 — LLM + Ontology + Capability Gateway
 
-This project converts natural-language risk questions into authorized, parameterized BigQuery queries while keeping physical database metadata out of the external LLM context.
+This project converts natural-language risk questions into validated, parameterized BigQuery queries while keeping physical database metadata out of the external LLM context.
 
 ## Architecture
 
@@ -8,7 +8,7 @@ This project converts natural-language risk questions into authorized, parameter
 User prompt
   → External LLM (logical JSON intent only)
   → Semantic Gateway (local JSON-LD resolution)
-  → Capability Gate (role + operator policy)
+  → Capability Gate (approved concepts + operators)
   → Deterministic SQL compiler
   → BigQuery dry run
   → BigQuery execution
@@ -24,7 +24,7 @@ The external LLM never receives JSON-LD, table names, column names, joins, proje
 CAP_<first 12 hex characters of SHA256(ontology-column-id)>
 ```
 
-The key is an internal identifier, not a password. Execution also requires the application role, an allowed operator, an ontology-approved join path, SQL policy validation, and a BigQuery dry run.
+The key is an internal identifier, not a password. This version deliberately does not implement role-based access control. Execution requires an approved capability, an allowed operator, an ontology-approved join path, SQL policy validation, and a BigQuery dry run.
 
 Example LLM output:
 
@@ -52,13 +52,12 @@ The application resolves those phrases locally and creates the SQL. Users and ex
 - Referenced tables must be in the ontology-approved join plan.
 - BigQuery dry-run and `maximum_bytes_billed` are applied before execution.
 - Query history is saved only after successful execution.
-- `ssn_hash` is configured as `RESTRICTED` for `RiskManager`/`Admin`, not `RiskAnalyst`.
 
 ## Files
 
 - `risk_agent.py` — Streamlit UI and external intent boundary.
 - `semantic_gateway.py` — local resolver, capability gate, join planner and SQL compiler.
-- `application_policy.json` — application-side physical/access policy bound to JSON-LD IDs.
+- `application_policy.json` — application-side physical/capability policy bound to JSON-LD IDs.
 - `knowledge_base.jsonld` — ontology and approved relationships.
 - `database_schema.md` — documentation only; no longer sent to the LLM.
 
@@ -67,7 +66,6 @@ The application resolves those phrases locally and creates the SQL. Users and ex
 ```toml
 GROQ_API_KEY = "..."
 TOGETHER_API_KEY1 = "..." # optional
-APP_ROLE = "RiskAnalyst"
 MAX_BYTES_BILLED = 1000000000
 
 [bigquery]
